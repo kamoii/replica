@@ -61,6 +61,8 @@ type Update = {
   serverFrame: number,
   clientFrame: number | null,
   diff: Diff[]
+} | {
+  type: 'exit-failure'
 };
 
 const MAX_FRAMES = 20;
@@ -232,7 +234,7 @@ function setAttribute(ws: WebSocket, element: any, onProp: boolean, attr: string
         // [delet   ]       'dele'           'dele'           // user types 't'
         // [delet   ]       'delet'          'dele'           // 'delet' received on server
         // [delet   ]       'delet'          'delet'          // 'delet' synced to client
-        
+
         // [delete  ]       'delet'          'delet'          // user types 'e'
         // [delete1 ]       'delet'          'delet'          // user types '1'
         // [delete12]       'delet'          'delet'          // user types '2'
@@ -257,7 +259,7 @@ function setAttribute(ws: WebSocket, element: any, onProp: boolean, attr: string
         // - Anatoly Dyatlov, deputy chief-engineer of the Chernobyl Nuclear Power Plant
 
         const frameData = clientFrame !== null ? getFrame(element, attr, clientFrame) : [];
-        
+
         if (!frameData.includes(value)) {
           element.value = value;
           clearFrames(element, attr);
@@ -342,7 +344,7 @@ function patchAttribute(ws: WebSocket, element: any, onProp: boolean, adiff: Att
       }
   }
 }
- 
+
 function buildDOM(ws: WebSocket, dom: DOM, index: number | null, parent: Element): Element {
   let element = null;
 
@@ -420,6 +422,9 @@ function connect() {
         }
 
         break;
+
+      case 'exit-failure':
+        alert("Error occured. Please reload the page.");
     }
   };
 }

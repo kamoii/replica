@@ -282,6 +282,8 @@ function connect() {
                     patch(ws, update.serverFrame, update.diff, root);
                 }
                 break;
+            case 'exit-failure':
+                alert("Error occured. Please reload the page.");
         }
     };
 }

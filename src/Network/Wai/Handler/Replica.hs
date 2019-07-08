@@ -6,6 +6,7 @@ module Network.Wai.Handler.Replica where
 import           Control.Concurrent             (forkIO, killThread)
 import           Control.Concurrent.STM         (TVar, atomically, newTVarIO, readTVar, writeTVar, retry)
 import           Control.Monad                  (join, forever)
+import           Control.Exception              (onException)
 
 import           Data.Aeson                     ((.:), (.=))
 import qualified Data.Aeson                     as A
@@ -42,6 +43,7 @@ instance A.FromJSON Event where
 data Update
   = ReplaceDOM V.HTML
   | UpdateDOM Int (Maybe Int) [V.Diff]
+  | ExitFailure
 
 instance A.ToJSON Update where
   toJSON (ReplaceDOM dom) = A.object
@@ -53,6 +55,9 @@ instance A.ToJSON Update where
     , "serverFrame" .= serverFrame
     , "clientFrame" .= clientFrame
     , "diff" .= ddiff
+    ]
+  toJSON ExitFailure = A.object
+    [ "type" .= V.t "exit-failure"
     ]
 
 app :: forall st.
@@ -96,6 +101,7 @@ websocketApp initial step pendingConn = do
       Nothing -> traceIO $ "Couldn't decode event: " <> show msg
 
   go conn chan cf Nothing initial 0
+    `onException` sendTextData conn (A.encode ExitFailure)
 
   killThread tid
 
