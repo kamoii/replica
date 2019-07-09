@@ -1,7 +1,6 @@
 "use strict";
 const MAX_FRAMES = 20;
 let serverFrame = 0;
-let clientFrame = null;
 function addFrame(element, frame, attr, frameData) {
     const frames = JSON.parse(element.dataset[attr] || "[]");
     frames.push([frame, frameData]);
@@ -150,7 +149,8 @@ function setAttribute(ws, element, onProp, attr, value) {
                 // Under normal circumstances (i.e. ~50ms lag) this will behave as expected.
                 // "Not great, not terrible..."
                 // - Anatoly Dyatlov, deputy chief-engineer of the Chernobyl Nuclear Power Plant
-                const frameData = clientFrame !== null ? getFrame(element, attr, clientFrame) : [];
+                // const frameData = clientFrame !== null ? getFrame(element, attr, clientFrame) : [];
+                const frameData = [];
                 if (!frameData.includes(value)) {
                     element.value = value;
                     clearFrames(element, attr);
@@ -283,7 +283,6 @@ function connect() {
             case 'update':
                 if (root !== null) {
                     serverFrame = update.serverFrame;
-                    clientFrame = update.clientFrame;
                     patch(ws, update.serverFrame, update.diff, root);
                 }
                 break;

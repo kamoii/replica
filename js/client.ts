@@ -59,13 +59,11 @@ type Update = {
 } | {
   type: 'update',
   serverFrame: number,
-  clientFrame: number | null,
   diff: Diff[]
 };
 
 const MAX_FRAMES = 20;
 let serverFrame = 0;
-let clientFrame: number | null = null;
 
 function addFrame(element: Element, frame: number, attr: string, frameData: any) {
   const frames = JSON.parse((element as any).dataset[attr] || "[]") as any[];
@@ -256,7 +254,8 @@ function setAttribute(ws: WebSocket, element: any, onProp: boolean, attr: string
         // "Not great, not terrible..."
         // - Anatoly Dyatlov, deputy chief-engineer of the Chernobyl Nuclear Power Plant
 
-        const frameData = clientFrame !== null ? getFrame(element, attr, clientFrame) : [];
+        // const frameData = clientFrame !== null ? getFrame(element, attr, clientFrame) : [];
+        const frameData : string[] = []
 
         if (!frameData.includes(value)) {
           element.value = value;
@@ -420,7 +419,6 @@ function connect() {
       case 'update':
         if (root !== null) {
           serverFrame = update.serverFrame;
-          clientFrame = update.clientFrame;
 
           patch(ws, update.serverFrame, update.diff, root);
         }

@@ -42,17 +42,16 @@ instance A.FromJSON Event where
 
 data Update
   = ReplaceDOM V.HTML
-  | UpdateDOM Int (Maybe Int) [V.Diff]
+  | UpdateDOM Int [V.Diff]
 
 instance A.ToJSON Update where
   toJSON (ReplaceDOM dom) = A.object
     [ "type" .= V.t "replace"
     , "dom"  .= dom
     ]
-  toJSON (UpdateDOM serverFrame clientFrame ddiff) = A.object
+  toJSON (UpdateDOM serverFrame ddiff) = A.object
     [ "type" .= V.t "update"
     , "serverFrame" .= serverFrame
-    , "clientFrame" .= clientFrame
     , "diff" .= ddiff
     ]
 
@@ -78,7 +77,6 @@ websocketApp :: forall st.
 websocketApp initial step pendingConn = do
   conn <- acceptRequest pendingConn
   chan <- newTVarIO Nothing
-  cf   <- newTVarIO Nothing
 
   forkPingThread conn 30
 
@@ -91,12 +89,11 @@ websocketApp initial step pendingConn = do
           case fire of
             Just fire' -> do
               writeTVar chan Nothing
-              writeTVar cf (Just $ evtClientFrame msg')
               pure (fire' msg')
             Nothing -> retry
       Nothing -> traceIO $ "Couldn't decode event: " <> show msg
 
-  go conn chan cf Nothing initial 0
+  go conn chan Nothing initial 0
     `onException` sendCloseCode conn closeCodeInternalError ("internal error" :: T.Text)
   sendClose conn ("done" :: T.Text)
 
@@ -105,21 +102,16 @@ websocketApp initial step pendingConn = do
   where
     closeCodeInternalError = 1011
 
-    go :: Connection -> TVar (Maybe (Event -> IO ())) -> TVar (Maybe Int) -> Maybe V.HTML -> st -> Int -> IO ()
-    go conn chan cf oldDom st serverFrame = do
+    go :: Connection -> TVar (Maybe (Event -> IO ())) -> Maybe V.HTML -> st -> Int -> IO ()
+    go conn chan oldDom st serverFrame = do
       r <- step st
       case r of
         Nothing -> pure ()
         Just (newDom, next, fire) -> do
-          clientFrame <- atomically $ do
-            a <- readTVar cf
-            writeTVar cf Nothing
-            pure a
-
           case oldDom of
             Nothing      -> sendTextData conn $ A.encode $ ReplaceDOM newDom
-            Just oldDom' -> sendTextData conn $ A.encode $ UpdateDOM serverFrame clientFrame (V.diff oldDom' newDom)
+            Just oldDom' -> sendTextData conn $ A.encode $ UpdateDOM serverFrame (V.diff oldDom' newDom)
 
           atomically $ writeTVar chan (Just fire)
 
-          go conn chan cf (Just newDom) next (serverFrame + 1)
+          go conn chan (Just newDom) next (serverFrame + 1)
