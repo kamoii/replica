@@ -94,6 +94,20 @@ function clearFrames(element: Element, attr: string) {
   (element as any).dataset[attr] = '[]';
 }
 
+function getData(element: HTMLElement, attr: string): any | null {
+  const data = element.dataset[attr]
+  return data ? JSON.parse(data) : null
+}
+
+function setData(element: HTMLElement, attr: string, data: any) {
+  element.dataset[attr] = JSON.stringify(data);
+}
+
+function clearData(element: HTMLElement, attr: string) {
+  // element.dataset[attr] = undefined;
+  element.removeAttribute(`data-${attr}`)
+}
+
 function patch(ws: WebSocket, serverFrame: number, diffs: Diff[], parent: Element) {
   for (const diff of diffs) {
     switch (diff.type) {
@@ -177,7 +191,11 @@ function setEventListener(ws: WebSocket, element: Element, name: string) {
     };
 
     if (eventName === 'input') {
-      addFrame(element, serverFrame, 'value', (event.target as any).value);
+      const inputEl = element as HTMLElement
+      const attr = 'value'
+      const datas : string[] = (getData(inputEl, attr) || []).concat(event.target.value)
+      setData(inputEl, attr, datas)
+      // addFrame(element, serverFrame, 'value', (event.target as any).value);
     }
 
     ws.send(JSON.stringify(msg));
@@ -254,13 +272,19 @@ function setAttribute(ws: WebSocket, element: any, onProp: boolean, attr: string
         // "Not great, not terrible..."
         // - Anatoly Dyatlov, deputy chief-engineer of the Chernobyl Nuclear Power Plant
 
-        // const frameData = clientFrame !== null ? getFrame(element, attr, clientFrame) : [];
-        const frameData : string[] = []
-
-        if (!frameData.includes(value)) {
+        const datas : string[] = getData(element,attr) || []
+        if (datas.length > 0 && datas[0] === value) {
+          datas.shift()
+          setData(element, attr, datas)
+        } else {
           element.value = value;
-          clearFrames(element, attr);
+          clearData(element, attr)
         }
+        // const frameData = clientFrame !== null ? getFrame(element, attr, clientFrame) : [];
+        // if (!frameData.includes(value)) {
+        //   element.value = value;
+        //   clearFrames(element, attr);
+        // }
       }
       else if (value === true) {
         element.setAttribute(attr, "");

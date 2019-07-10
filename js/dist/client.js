@@ -22,6 +22,17 @@ function getFrame(element, attr, frame) {
 function clearFrames(element, attr) {
     element.dataset[attr] = '[]';
 }
+function getData(element, attr) {
+    const data = element.dataset[attr];
+    return data ? JSON.parse(data) : null;
+}
+function setData(element, attr, data) {
+    element.dataset[attr] = JSON.stringify(data);
+}
+function clearData(element, attr) {
+    // element.dataset[attr] = undefined;
+    element.removeAttribute(`data-${attr}`);
+}
 function patch(ws, serverFrame, diffs, parent) {
     for (const diff of diffs) {
         switch (diff.type) {
@@ -88,7 +99,11 @@ function setEventListener(ws, element, name) {
             clientFrame: serverFrame,
         };
         if (eventName === 'input') {
-            addFrame(element, serverFrame, 'value', event.target.value);
+            const inputEl = element;
+            const attr = 'value';
+            const datas = (getData(inputEl, attr) || []).concat(event.target.value);
+            setData(inputEl, attr, datas);
+            // addFrame(element, serverFrame, 'value', (event.target as any).value);
         }
         ws.send(JSON.stringify(msg));
     };
@@ -149,12 +164,20 @@ function setAttribute(ws, element, onProp, attr, value) {
                 // Under normal circumstances (i.e. ~50ms lag) this will behave as expected.
                 // "Not great, not terrible..."
                 // - Anatoly Dyatlov, deputy chief-engineer of the Chernobyl Nuclear Power Plant
-                // const frameData = clientFrame !== null ? getFrame(element, attr, clientFrame) : [];
-                const frameData = [];
-                if (!frameData.includes(value)) {
-                    element.value = value;
-                    clearFrames(element, attr);
+                const datas = getData(element, attr) || [];
+                if (datas.length > 0 && datas[0] === value) {
+                    datas.shift();
+                    setData(element, attr, datas);
                 }
+                else {
+                    element.value = value;
+                    clearData(element, attr);
+                }
+                // const frameData = clientFrame !== null ? getFrame(element, attr, clientFrame) : [];
+                // if (!frameData.includes(value)) {
+                //   element.value = value;
+                //   clearFrames(element, attr);
+                // }
             }
             else if (value === true) {
                 element.setAttribute(attr, "");
