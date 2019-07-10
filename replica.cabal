@@ -1,10 +1,10 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.31.1.
+-- This file has been generated from package.yaml by hpack version 0.31.2.
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: cb2b162b08a61164536382d1e17cead30ae541cb6a26da09dc1bb4553cea09b9
+-- hash: c84e7f78bd4023b392ed09843ec479d010f93b9dd784a3391f12763e28000367
 
 name:           replica
 version:        0.1.0.0
@@ -40,6 +40,7 @@ library
   build-depends:
       Diff
     , aeson
+    , async
     , base >=4.7 && <5
     , bytestring
     , containers
@@ -65,6 +66,7 @@ test-suite replica-test
       Diff
     , QuickCheck
     , aeson
+    , async
     , base >=4.7 && <5
     , bytestring
     , containers
