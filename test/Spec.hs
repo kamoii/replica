@@ -7,8 +7,11 @@ import qualified Data.Text as T
 
 import           Test.QuickCheck
 import           Test.QuickCheck.Instances
+import           Test.Tasty
 
 import           Replica.VDOM
+
+import qualified VDOMRenderTest
 
 instance Arbitrary Attr where
   arbitrary = do
@@ -30,8 +33,8 @@ instance Show Attr where
   show (ABool t)  = "ABool " <> show t
   show (AEvent _) = "AEvent"
   show (AMap m)   = "AMap " <> show m
- 
-propAttrsDiff :: Attrs -> Attrs -> Bool 
+
+propAttrsDiff :: Attrs -> Attrs -> Bool
 propAttrsDiff a b = patchAttrs (diffAttrs a b) a == b
 
 quickCheckAttrsDiff = quickCheckWith args propAttrsDiff
@@ -51,7 +54,7 @@ instance Arbitrary VDOM where
       -- 1 -> VLeaf <$> arbitrary <*> arbitrary
       1 -> VText <$> arbitrary
 
-propDiff :: HTML -> HTML -> Bool 
+propDiff :: HTML -> HTML -> Bool
 propDiff a b = patch (diff a b) a == b
 
 quickCheckDiff a b = quickCheckWith args propDiff
@@ -65,3 +68,6 @@ main = do
   quickCheckAttrsDiff
   quickCheckDiff 4 1000
   quickCheckDiff 5 200
+  defaultMain $ testGroup "tests"
+    [ VDOMRenderTest.tests
+    ]

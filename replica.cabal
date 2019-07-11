@@ -1,10 +1,10 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.31.1.
+-- This file has been generated from package.yaml by hpack version 0.31.2.
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 934c3c818dc54dc66c2f0d09adbc567a3dfdf1eb37bee17e74f6c89b5d672e8c
+-- hash: 9fa706ce504abad44796fd269606a8dd3e6c9d907e335ca3c943ba7a95e00c7b
 
 name:           replica
 version:        0.1.0.0
@@ -59,6 +59,7 @@ test-suite replica-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      VDOMRenderTest
       Paths_replica
   hs-source-dirs:
       test
@@ -75,6 +76,8 @@ test-suite replica-test
     , quickcheck-instances
     , replica
     , stm
+    , tasty
+    , tasty-hunit
     , template-haskell
     , text
     , wai

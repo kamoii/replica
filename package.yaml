@@ -62,3 +62,5 @@ tests:
     - QuickCheck
     - quickcheck-instances
     - replica
+    - tasty
+    - tasty-hunit
