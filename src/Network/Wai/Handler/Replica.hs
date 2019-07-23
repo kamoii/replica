@@ -240,8 +240,6 @@ firstStep acquireRes releaseRes_ initial step = mask $ \restore -> do
     r <- restore $ step (initial v)
     case r of
       Nothing -> do
-        -- Even if `release` raised exception, its gurateed that
-        -- release is called once.
         release
         pure Nothing
       Just (_vdom, st, fire) -> do
