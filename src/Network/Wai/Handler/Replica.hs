@@ -22,8 +22,8 @@ import qualified Data.Text.Lazy                 as TL
 import qualified Data.Text.Lazy.Builder         as TB
 import           Data.Bool                      (bool)
 import           Data.Void                      (Void, absurd)
+import           Data.IORef                     (newIORef, atomicModifyIORef)
 import           Network.HTTP.Types             (status200)
-import           Data.IORef
 
 import           Network.WebSockets             (ServerApp)
 import           Network.WebSockets.Connection  (ConnectionOptions, Connection, acceptRequest, forkPingThread, receiveData, sendTextData, sendClose, sendCloseCode)
@@ -234,7 +234,7 @@ firstStep acquireRes releaseRes_ initial step = mask $ \restore -> do
   i <- newIORef False
   -- Make sure that `releaseRes_ v` is called once.
   let release = mask_ $ do
-        b <- atomicModifyIORef i $ \v -> (True, v)
+        b <- atomicModifyIORef i $ \done -> (True, done)
         if b then pure () else releaseRes_ v
   flip onException release $ do
     r <- restore $ step (initial v)
