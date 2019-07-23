@@ -10,7 +10,7 @@ import           Control.Concurrent.STM         (TMVar, TQueue, TVar, STM, atomi
                                                 , newTQueue, writeTQueue, readTQueue)
 import           Control.Monad                  (join, forever)
 import           Control.Applicative            ((<|>))
-import           Control.Exception              (SomeException(SomeException),Exception, throwIO, evaluate, try)
+import           Control.Exception              (SomeException(SomeException),Exception, throwIO, evaluate, try, mask, mask_, onException, finally)
 
 import           Data.Aeson                     ((.:), (.=))
 import qualified Data.Aeson                     as A
@@ -23,6 +23,7 @@ import qualified Data.Text.Lazy.Builder         as TB
 import           Data.Bool                      (bool)
 import           Data.Void                      (Void, absurd)
 import           Network.HTTP.Types             (status200)
+import           Data.IORef
 
 import           Network.WebSockets             (ServerApp)
 import           Network.WebSockets.Connection  (ConnectionOptions, Connection, acceptRequest, forkPingThread, receiveData, sendTextData, sendClose, sendCloseCode)
@@ -63,15 +64,17 @@ instance A.ToJSON Update where
     , "diff" .= ddiff
     ]
 
-app :: forall st.
+app :: forall st res.
      V.HTML
   -> ConnectionOptions
   -> Middleware
-  -> st
+  -> IO res        -- ^ Acquire resource
+  -> (res -> IO ())  -- ^ Release resource
+  -> (res -> st)
   -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
   -> Application
-app index options middleware initial step
-  = websocketsOr options (websocketApp initial step) (middleware backupApp)
+app index options middleware initial acquireRes releaseRes step
+  = websocketsOr options (websocketApp initial acquireRes releaseRes step) (middleware backupApp)
 
   where
     indexBS = BL.fromStrict $ TE.encodeUtf8 $ TL.toStrict $ TB.toLazyText $ R.renderHTML index
@@ -79,23 +82,27 @@ app index options middleware initial step
     backupApp :: Application
     backupApp _ respond = respond $ responseLBS status200 [("content-type", "text/html")] indexBS
 
-websocketApp :: forall st.
-     st
+websocketApp :: forall st res.
+     IO res
+  -> (res -> IO ())
+  -> (res -> st)
   -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
   -> ServerApp
-websocketApp initial step pendingConn = do
+websocketApp acquireRes releaseRes initial step pendingConn = do
   conn <- acceptRequest pendingConn
   forkPingThread conn 30
   r <- try $ do
-    s <- firstStep initial step
-    case s of
-      Nothing ->
-        pure Nothing
-      Just (_initialVdom, startContext') -> do
-        -- `initialVdom` can be used for SSR(server-side rendering). We aren't using it yet,
-        -- so its prefixed by underscore `_`.
-        ctx <- startContext'
-        attachContextToWebsocket conn ctx
+    join $ mask $ \restore -> do
+      s <- restore $ firstStep acquireRes releaseRes initial step
+      case s of
+        Nothing ->
+          pure $ pure Nothing
+        Just (_initialVdom, startContext', _release) -> do
+          -- `initialVdom` can be used for SSR(server-side rendering). We aren't using it yet,
+          -- so its prefixed by underscore `_`.
+          ctx <- startContext'
+          -- Execute `attachContextToWebsocket` outside mask
+          pure $ attachContextToWebsocket conn ctx
   case r of
     Left (SomeException e)         -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
     Right (Just (SomeException e)) -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
@@ -196,24 +203,61 @@ data Frame = Frame
   , frameFire :: Event -> Maybe (IO ())
   }
 
+-- | Execute the first step.
+--
+-- In rare case, the app might not create any VDOM and gracefuly
+-- end. In such case, `Nothing` is returned.
+--
+-- Don't execute while mask.
+--
+-- About Resource management
+--  * リソースが獲得されたなら、firstSteps関数が
+--
+-- もし `firstStep`関数が無事完了し、Just を返したならば、返り値の IO
+-- Context, もしくは IO () のどちらかが一方だけが必ず呼ばれる必要があ
+-- る。後者は、Context を開始したくない場合に利用する(例えば一定時間立っ
+-- ても browser が繋げに来なかった場合、など)。
+--
+-- リソース獲得及び解放ハンドラは mask された状態で実行される
+--
+-- Implementation notes:
+-- 全体を onException で囲めないのは Nohting の場合は例外が発生していないが
+-- `releaseRes` を呼び出さないといけないため。
 firstStep
-  :: st
+  :: IO res
+  -> (res -> IO ())
+  -> (res -> st)
   -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
-  -> IO (Maybe (V.HTML, IO Context))
-firstStep initial step = do
-  r <- step initial
-  case r of
-    Nothing ->
-      pure Nothing
-    Just (_vdom, st, fire) -> do
-      vdom <- evaluate _vdom
-      pure $ Just (vdom, startContext step (vdom, st, fire))
+  -> IO (Maybe (V.HTML, IO Context, IO ()))
+firstStep acquireRes releaseRes_ initial step = mask $ \restore -> do
+  v <- acquireRes
+  i <- newIORef False
+  -- Make sure that `releaseRes_ v` is called once.
+  let release = mask_ $ do
+        b <- atomicModifyIORef i $ \v -> (True, v)
+        if b then pure () else releaseRes_ v
+  flip onException release $ do
+    r <- restore $ step (initial v)
+    case r of
+      Nothing -> do
+        -- Even if `release` raised exception, its gurateed that
+        -- release is called once.
+        release
+        pure Nothing
+      Just (_vdom, st, fire) -> do
+        vdom <- evaluate _vdom
+        pure $ Just
+          ( vdom
+          , startContext release step (vdom, st, fire)
+          , release
+          )
 
 startContext
-  :: (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
+  :: IO ()
+  -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
   -> (V.HTML, st, Event -> Maybe (IO ()))
   -> IO Context
-startContext step (vdom, st, fire) = do
+startContext release step (vdom, st, fire) = flip onException release $ do
   let frame0 = Frame 0 vdom (const $ Just $ pure ())
   let frame1 = Frame 1 vdom fire
   (fv, qv) <- atomically $ do
@@ -221,7 +265,7 @@ startContext step (vdom, st, fire) = do
     f <- newTVar (frame0, r)
     q <- newTQueue
     pure (f, q)
-  th <- async $ withWorker
+  th <- async $ flip finally release $ withWorker
     (fireLoop (getNewFrame fv) (getEvent qv))
     (stepLoop (setNewFrame fv) step st frame1)
   pure $ Context fv qv th
