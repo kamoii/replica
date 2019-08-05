@@ -73,8 +73,8 @@ app :: forall st res.
   -> (res -> st)
   -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
   -> Application
-app index options middleware initial acquireRes releaseRes step
-  = websocketsOr options (websocketApp initial acquireRes releaseRes step) (middleware backupApp)
+app index options middleware acquireRes releaseRes initial step
+  = websocketsOr options (websocketApp acquireRes releaseRes initial step) (middleware backupApp)
 
   where
     indexBS = BL.fromStrict $ TE.encodeUtf8 $ TL.toStrict $ TB.toLazyText $ R.renderHTML index
