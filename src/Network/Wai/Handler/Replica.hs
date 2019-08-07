@@ -1,25 +1,32 @@
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Network.Wai.Handler.Replica where
 
-import           Control.Concurrent.Async       (Async, async, waitCatchSTM, race)
+import           Control.Concurrent.Async       (Async, async, waitCatchSTM, race, cancel)
 import           Control.Concurrent.STM         (TMVar, TQueue, TVar, STM, atomically, retry, check, throwSTM
-                                                , newTVar, readTVar, writeTVar
+                                                , newTVar, readTVar, writeTVar, modifyTVar'
                                                 , newTMVar, newEmptyTMVar, tryPutTMVar, readTMVar, isEmptyTMVar
                                                 , newTQueue, writeTQueue, readTQueue)
 import           Control.Monad                  (join, forever)
 import           Control.Applicative            ((<|>))
 import           Control.Exception              (SomeException(SomeException),Exception, throwIO, evaluate, try, mask, mask_, onException, finally)
+import           Crypto.Random                  (MonadRandom(..))
 
 import           Data.Aeson                     ((.:), (.=))
 import qualified Data.Aeson                     as A
 
+import qualified Data.ByteString                as B
 import qualified Data.ByteString.Lazy           as BL
 import qualified Data.Text                      as T
 import qualified Data.Text.Encoding             as TE
 import qualified Data.Text.Lazy                 as TL
 import qualified Data.Text.Lazy.Builder         as TB
+import qualified Data.Map                       as M
+import           Data.Maybe                     (fromMaybe)
 import           Data.Bool                      (bool)
 import           Data.Void                      (Void, absurd)
 import           Data.IORef                     (newIORef, atomicModifyIORef)
@@ -29,6 +36,7 @@ import           Network.WebSockets             (ServerApp)
 import           Network.WebSockets.Connection  (ConnectionOptions, Connection, acceptRequest, forkPingThread, receiveData, sendTextData, sendClose, sendCloseCode)
 import           Network.Wai                    (Application, Middleware, responseLBS)
 import           Network.Wai.Handler.WebSockets (websocketsOr)
+import           Text.Hex                       (encodeHex, decodeHex)
 
 import qualified Replica.VDOM                   as V
 import qualified Replica.VDOM.Render            as R
@@ -64,31 +72,43 @@ instance A.ToJSON Update where
     , "diff" .= ddiff
     ]
 
-app :: forall st res.
-     V.HTML
-  -> ConnectionOptions
-  -> Middleware
-  -> IO res        -- ^ Acquire resource
-  -> (res -> IO ())  -- ^ Release resource
-  -> (res -> st)
-  -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
-  -> Application
-app index options middleware acquireRes releaseRes initial step
-  = websocketsOr options (websocketApp acquireRes releaseRes initial step) (middleware backupApp)
+data AppConfig = forall st res. AppConfig
+  { acfgTitle               :: T.Text
+  , acfgHeader              :: V.HTML
+  , acfgWSConnectionOptions :: ConnectionOptions
+  , acfgMiddleware          :: Middleware
+  , acfgResourceAquire      :: IO res
+  , acfgResourceRelease     :: res -> IO ()
+  , acfgInitial             :: res -> st
+  , acfgStep                :: (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
+  }
 
+-- | Create replica application.
+app :: forall a. AppConfig -> (Application -> IO a) -> IO a
+app acfg@AppConfig{..} cb = do
+  actx <- initializeAppCtx acfg
+  let wapp = websocketApp actx
+  let bapp = acfgMiddleware $ backupApp actx
+  withWorker (manageAppCtx actx) $ cb (websocketsOr acfgWSConnectionOptions wapp bapp)
   where
-    indexBS = BL.fromStrict $ TE.encodeUtf8 $ TL.toStrict $ TB.toLazyText $ R.renderHTML index
+    renderHTML html = BL.fromStrict
+      $ TE.encodeUtf8
+      $ TL.toStrict
+      $ TB.toLazyText
+      $ R.renderHTML html
 
-    backupApp :: Application
-    backupApp _ respond = respond $ responseLBS status200 [("content-type", "text/html")] indexBS
+    backupApp :: AppContext -> Application
+    backupApp actx _req respond = do
+      v <- preRender actx acfg
+      case v of
+        Nothing ->
+          respond $ responseLBS status200 [] "done?"
+        Just (ctxId, body) -> do
+          let html = V.ssrHtml acfgTitle (encodeContextId ctxId) acfgHeader body
+          respond $ responseLBS status200 [("content-type", "text/html")] (renderHTML html)
 
-websocketApp :: forall st res.
-     IO res
-  -> (res -> IO ())
-  -> (res -> st)
-  -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
-  -> ServerApp
-websocketApp acquireRes releaseRes initial step pendingConn = do
+websocketApp :: AppContext -> ServerApp
+websocketApp actx pendingConn = do
   conn <- acceptRequest pendingConn
   forkPingThread conn 30
   r <- try $ do
@@ -110,6 +130,56 @@ websocketApp acquireRes releaseRes initial step pendingConn = do
   where
     closeCodeInternalError = 1011
 
+-- | AppContext
+
+data AppContext = AppContext
+  { actxAppConfig :: AppConfig
+  , actxOrphanCtx :: TVar (M.Map ContextID Context)
+  }
+
+initializeAppCtx :: AppConfig -> IO AppContext
+initializeAppCtx acfg = do
+  m <- atomically $ newTVar mempty
+  pure $ AppContext acfg m
+
+-- | Server-side rendering
+-- | For rare case, the application could end without generating.
+-- TODO: use appconfig inside AppContext
+preRender :: AppContext -> AppConfig -> IO (Maybe (ContextID, V.HTML))
+preRender AppContext{..} AppConfig{..} =
+  mask $ \restore -> do
+    s <- restore $ firstStep acfgResourceAquire acfgResourceRelease acfgInitial acfgStep
+    case s of
+      Nothing -> pure Nothing
+      Just (initialVdom, startContext', _release) -> do
+        -- TODO: relesase は不要かも。もう走らせてしまったほうがいいかも。
+        ctx <- startContext'
+        -- Take care not to lost context, or else we'll leak threads.
+        flip onException (killContext ctx) $ do
+          ctxId <- genContextId
+          atomically $ modifyTVar' actxOrphanCtx $ M.insert ctxId ctx
+          pure $ Just (ctxId, initialVdom)
+
+-- | websocket に取り出す
+-- | 適切な例外対応が必要
+attach :: AppContext -> ContextID -> (Context -> IO a) -> IO a
+attach = undefined
+
+manageAppCtx :: AppContext -> IO Void
+manageAppCtx axtx = undefined
+
+newtype ContextID = ContextID B.ByteString
+  deriving (Eq, Ord)
+
+genContextId :: MonadRandom m => m ContextID
+genContextId = ContextID <$> getRandomBytes 32
+
+-- | ContextID's text representation, safe to use as url path segment
+encodeContextId :: ContextID -> T.Text
+encodeContextId (ContextID bs) = encodeHex bs
+
+decodeContextId :: T.Text -> Maybe ContextID
+decodeContextId t = ContextID <$> decodeHex t
 
 -- These exceptions are not to ment recoverable. Should stop the context.
 -- TODO: Make it more rich to make debug easier?
@@ -202,6 +272,13 @@ data Frame = Frame
   , frameVdom :: V.HTML
   , frameFire :: Event -> Maybe (IO ())
   }
+
+-- | Kill Context
+-- |
+-- | Do nothing if the context has already terminated.
+-- | Blocks until the context is actually terminated.
+killContext :: Context -> IO ()
+killContext Context{ctxThread} = cancel ctxThread
 
 -- | Execute the first step.
 --

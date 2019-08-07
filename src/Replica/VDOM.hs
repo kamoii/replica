@@ -64,3 +64,23 @@ defaultIndex title header =
   ]
   where
     fl = M.fromList
+
+ssrHtml :: T.Text -> T.Text -> HTML -> HTML -> HTML
+ssrHtml title contextId header body =
+  [ VLeaf "meta" (fl [("charset", AText "utf-8")])
+  , VLeaf "!doctype" (fl [("html", ABool True)])
+  , VNode "html" mempty
+      [ VNode "head" mempty (header' <> header)
+      , VNode "body" mempty
+          [ VNode "div" mempty [ body ]
+          , VNode "script" (fl [("language", AText "javascript")])
+              [ VRawText $ T.decodeUtf8 clientDriver ]
+          ]
+      ]
+  ]
+  where
+    header' =
+      [ VNode "title" mempty [VText title]
+      , VLeaf "meta" (fl [("name", AText "replica-context-id"), ("content", AText contentId)])
+      ]
+    fl = M.fromList

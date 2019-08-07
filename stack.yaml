@@ -1,3 +1,5 @@
 resolver: lts-14.0
 packages:
 - .
+extra-deps:
+- hex-text-0.1.0.0@sha256:52dc2cf5ce45f7d86ea5e56e2ac57820f788c10bbb3fe83f6d57e678a426305b,1072
