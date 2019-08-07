@@ -66,12 +66,12 @@ defaultIndex title header =
     fl = M.fromList
 
 ssrHtml :: T.Text -> T.Text -> HTML -> HTML -> HTML
-ssrHtml title contextId header body =
+ssrHtml title wsPath header body =
   [ VLeaf "meta" (fl [("charset", AText "utf-8")])
   , VLeaf "!doctype" (fl [("html", ABool True)])
   , VNode "html" mempty
-      [ VNode "head" mempty (header' <> header)
-      , VNode "body" mempty
+      [ VNode "head" mempty ([VNode "title" mempty [VText title]] <> header)
+      , VNode "body" (fl [("data-replica-ws-path", AText wsPath)])
           [ VNode "div" mempty [ body ]
           , VNode "script" (fl [("language", AText "javascript")])
               [ VRawText $ T.decodeUtf8 clientDriver ]
@@ -79,8 +79,4 @@ ssrHtml title contextId header body =
       ]
   ]
   where
-    header' =
-      [ VNode "title" mempty [VText title]
-      , VLeaf "meta" (fl [("name", AText "replica-context-id"), ("content", AText contentId)])
-      ]
     fl = M.fromList

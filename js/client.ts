@@ -392,13 +392,16 @@ function buildDOM(ws: WebSocket, dom: DOM, index: number | null, parent: Element
 const CLOSE_CODE_NORMAL_CLOSURE = 1000
 const CLOSE_CODE_INTERNAL_ERROR = 1011
 
+// Path to connect. Includes information to attach to proper context.
+const WS_PATH_DATA_ATTR = 'replica-ws-path'
+
 function connect() {
+  // HTML render by SSR has one div and script for body's child.
   let root = document.createElement('div');
-
-  const port = window.location.port ? window.location.port : (window.location.protocol === 'http' ? 80 : 443);
-  const ws = new WebSocket("ws://" + window.location.hostname + ":" + port);
-
   document.body.appendChild(root);
+  const wsPath = "/fooo" // TODO:
+  const port = window.location.port ? window.location.port : (window.location.protocol === 'http' ? 80 : 443);
+  const ws = new WebSocket("ws://" + window.location.hostname + ":" + port + wsPath);
 
   ws.onmessage = (event) => {
     const update: Update = JSON.parse(event.data);

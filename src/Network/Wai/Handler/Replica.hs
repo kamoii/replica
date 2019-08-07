@@ -97,38 +97,32 @@ app acfg@AppConfig{..} cb = do
       $ TB.toLazyText
       $ R.renderHTML html
 
+    wsPath :: ContextID -> T.Text
+    wsPath ctxId = "/" <> encodeContextId ctxId
+
     backupApp :: AppContext -> Application
     backupApp actx _req respond = do
       v <- preRender actx acfg
       case v of
-        Nothing ->
-          respond $ responseLBS status200 [] "done?"
+        Nothing -> do
+          respond $ responseLBS status200 [] ""
         Just (ctxId, body) -> do
-          let html = V.ssrHtml acfgTitle (encodeContextId ctxId) acfgHeader body
+          let html = V.ssrHtml acfgTitle (wsPath ctxId) acfgHeader body
           respond $ responseLBS status200 [("content-type", "text/html")] (renderHTML html)
 
-websocketApp :: AppContext -> ServerApp
-websocketApp actx pendingConn = do
-  conn <- acceptRequest pendingConn
-  forkPingThread conn 30
-  r <- try $ do
-    join $ mask $ \restore -> do
-      s <- restore $ firstStep acquireRes releaseRes initial step
-      case s of
-        Nothing ->
-          pure $ pure Nothing
-        Just (_initialVdom, startContext', _release) -> do
-          -- `initialVdom` can be used for SSR(server-side rendering). We aren't using it yet,
-          -- so its prefixed by underscore `_`.
-          ctx <- startContext'
-          -- Execute `attachContextToWebsocket` outside mask
-          pure $ attachContextToWebsocket conn ctx
-  case r of
-    Left (SomeException e)         -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
-    Right (Just (SomeException e)) -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
-    Right _                        -> sendClose conn ("done" :: T.Text)
-  where
-    closeCodeInternalError = 1011
+    websocketApp :: AppContext -> ServerApp
+    websocketApp actx pendingConn = do
+      -- TODO: decode context id from path
+      conn <- acceptRequest pendingConn
+      forkPingThread conn 30
+      let ctx = undefined
+      r <- try $ attachContextToWebsocket conn ctx
+      case r of
+        Left (SomeException e)         -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
+        Right (Just (SomeException e)) -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
+        Right _                        -> sendClose conn ("done" :: T.Text)
+      where
+        closeCodeInternalError = 1011
 
 -- | AppContext
 
