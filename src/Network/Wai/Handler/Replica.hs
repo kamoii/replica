@@ -11,7 +11,7 @@ import           Control.Concurrent.STM         (TMVar, TQueue, TVar, STM, atomi
                                                 , newTVar, readTVar, writeTVar, modifyTVar'
                                                 , newTMVar, newEmptyTMVar, tryPutTMVar, readTMVar, isEmptyTMVar
                                                 , newTQueue, writeTQueue, readTQueue)
-import           Control.Monad                  (join, forever)
+import           Control.Monad                  (join, forever, guard)
 import           Control.Applicative            ((<|>))
 import           Control.Exception              (SomeException(SomeException),Exception, throwIO, evaluate, try, mask, mask_, onException, finally)
 import           Crypto.Random                  (MonadRandom(..))
@@ -32,8 +32,8 @@ import           Data.Void                      (Void, absurd)
 import           Data.IORef                     (newIORef, atomicModifyIORef)
 import           Network.HTTP.Types             (status200)
 
-import           Network.WebSockets             (ServerApp)
-import           Network.WebSockets.Connection  (ConnectionOptions, Connection, acceptRequest, forkPingThread, receiveData, sendTextData, sendClose, sendCloseCode)
+import           Network.WebSockets             (ServerApp, requestPath)
+import           Network.WebSockets.Connection  (ConnectionOptions, Connection, pendingRequest, rejectRequest, acceptRequest, forkPingThread, receiveData, sendTextData, sendClose, sendCloseCode)
 import           Network.Wai                    (Application, Middleware, responseLBS)
 import           Network.Wai.Handler.WebSockets (websocketsOr)
 import           Text.Hex                       (encodeHex, decodeHex)
@@ -72,24 +72,27 @@ instance A.ToJSON Update where
     , "diff" .= ddiff
     ]
 
-data AppConfig = forall st res. AppConfig
+data AppConfig = AppConfig
   { acfgTitle               :: T.Text
   , acfgHeader              :: V.HTML
   , acfgWSConnectionOptions :: ConnectionOptions
   , acfgMiddleware          :: Middleware
-  , acfgResourceAquire      :: IO res
-  , acfgResourceRelease     :: res -> IO ()
-  , acfgInitial             :: res -> st
-  , acfgStep                :: (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
+  }
+
+data ReplicaAppConfig = forall st res. ReplicaAppConfig
+  { rcfgResourceAquire  :: IO res
+  , rcfgResourceRelease :: res -> IO ()
+  , rcfgInitial         :: res -> st
+  , rcfgStep            :: (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
   }
 
 -- | Create replica application.
-app :: forall a. AppConfig -> (Application -> IO a) -> IO a
-app acfg@AppConfig{..} cb = do
-  actx <- initializeAppCtx acfg
-  let wapp = websocketApp actx
-  let bapp = acfgMiddleware $ backupApp actx
-  withWorker (manageAppCtx actx) $ cb (websocketsOr acfgWSConnectionOptions wapp bapp)
+app :: forall a. AppConfig -> ReplicaAppConfig -> (Application -> IO a) -> IO a
+app AppConfig{..} rcfg cb = do
+  rapp <- initializeReplicaApp rcfg
+  let wapp = websocketApp rapp
+  let bapp = acfgMiddleware $ backupApp rapp
+  withWorker (manageReplicaApp rapp) $ cb (websocketsOr acfgWSConnectionOptions wapp bapp)
   where
     renderHTML html = BL.fromStrict
       $ TE.encodeUtf8
@@ -100,9 +103,9 @@ app acfg@AppConfig{..} cb = do
     wsPath :: ContextID -> T.Text
     wsPath ctxId = "/" <> encodeContextId ctxId
 
-    backupApp :: AppContext -> Application
-    backupApp actx _req respond = do
-      v <- preRender actx acfg
+    backupApp :: ReplicaApp -> Application
+    backupApp rapp _req respond = do
+      v <- preRender rapp rcfg
       case v of
         Nothing -> do
           respond $ responseLBS status200 [] ""
@@ -110,39 +113,44 @@ app acfg@AppConfig{..} cb = do
           let html = V.ssrHtml acfgTitle (wsPath ctxId) acfgHeader body
           respond $ responseLBS status200 [("content-type", "text/html")] (renderHTML html)
 
-    websocketApp :: AppContext -> ServerApp
-    websocketApp actx pendingConn = do
-      -- TODO: decode context id from path
-      conn <- acceptRequest pendingConn
-      forkPingThread conn 30
-      let ctx = undefined
-      r <- try $ attachContextToWebsocket conn ctx
-      case r of
-        Left (SomeException e)         -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
-        Right (Just (SomeException e)) -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
-        Right _                        -> sendClose conn ("done" :: T.Text)
+    websocketApp :: ReplicaApp -> ServerApp
+    websocketApp rapp pendingConn = do
+      let path = TE.decodeUtf8 $ requestPath $ pendingRequest pendingConn
+      case decodeContextId (T.drop 1 path) of
+        Nothing -> do
+          -- TODO: what happens to the client side?
+          rejectRequest pendingConn "invalid ws path"
+        Just ctxId -> do
+          conn <- acceptRequest pendingConn
+          forkPingThread conn 30
+          let ctx = undefined
+          r <- try $ attachContextToWebsocket conn ctx
+          case r of
+            Left (SomeException e)         -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
+            Right (Just (SomeException e)) -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
+            Right _                        -> sendClose conn ("done" :: T.Text)
       where
         closeCodeInternalError = 1011
 
--- | AppContext
+-- | ReplicaApp
 
-data AppContext = AppContext
-  { actxAppConfig :: AppConfig
+data ReplicaApp = ReplicaApp
+  { actxConfig    :: ReplicaAppConfig
   , actxOrphanCtx :: TVar (M.Map ContextID Context)
   }
 
-initializeAppCtx :: AppConfig -> IO AppContext
-initializeAppCtx acfg = do
+initializeReplicaApp :: ReplicaAppConfig -> IO ReplicaApp
+initializeReplicaApp rcfg = do
   m <- atomically $ newTVar mempty
-  pure $ AppContext acfg m
+  pure $ ReplicaApp rcfg m
 
 -- | Server-side rendering
 -- | For rare case, the application could end without generating.
--- TODO: use appconfig inside AppContext
-preRender :: AppContext -> AppConfig -> IO (Maybe (ContextID, V.HTML))
-preRender AppContext{..} AppConfig{..} =
+-- TODO: use appconfig inside ReplicaApp
+preRender :: ReplicaApp -> ReplicaAppConfig -> IO (Maybe (ContextID, V.HTML))
+preRender ReplicaApp{..} ReplicaAppConfig{..} =
   mask $ \restore -> do
-    s <- restore $ firstStep acfgResourceAquire acfgResourceRelease acfgInitial acfgStep
+    s <- restore $ firstStep rcfgResourceAquire rcfgResourceRelease rcfgInitial rcfgStep
     case s of
       Nothing -> pure Nothing
       Just (initialVdom, startContext', _release) -> do
@@ -156,24 +164,29 @@ preRender AppContext{..} AppConfig{..} =
 
 -- | websocket に取り出す
 -- | 適切な例外対応が必要
-attach :: AppContext -> ContextID -> (Context -> IO a) -> IO a
+attach :: ReplicaApp -> ContextID -> (Context -> IO a) -> IO a
 attach = undefined
 
-manageAppCtx :: AppContext -> IO Void
-manageAppCtx axtx = undefined
+manageReplicaApp :: ReplicaApp -> IO Void
+manageReplicaApp axtx = undefined
 
 newtype ContextID = ContextID B.ByteString
   deriving (Eq, Ord)
 
+contextIdByteLength = 32
+
 genContextId :: MonadRandom m => m ContextID
-genContextId = ContextID <$> getRandomBytes 32
+genContextId = ContextID <$> getRandomBytes contextIdByteLength
 
 -- | ContextID's text representation, safe to use as url path segment
 encodeContextId :: ContextID -> T.Text
 encodeContextId (ContextID bs) = encodeHex bs
 
 decodeContextId :: T.Text -> Maybe ContextID
-decodeContextId t = ContextID <$> decodeHex t
+decodeContextId t = do
+  bs <- decodeHex t
+  guard $ B.length bs == contextIdByteLength
+  pure $ ContextID bs
 
 -- These exceptions are not to ment recoverable. Should stop the context.
 -- TODO: Make it more rich to make debug easier?
