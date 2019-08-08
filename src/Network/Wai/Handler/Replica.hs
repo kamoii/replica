@@ -105,7 +105,7 @@ app AppConfig{..} rcfg cb = do
 
     backupApp :: ReplicaApp -> Application
     backupApp rapp _req respond = do
-      v <- preRender rapp rcfg
+      v <- preRender rapp
       case v of
         Nothing -> do
           respond $ responseLBS status200 [] ""
@@ -115,8 +115,8 @@ app AppConfig{..} rcfg cb = do
 
     websocketApp :: ReplicaApp -> ServerApp
     websocketApp rapp pendingConn = do
-      let path = TE.decodeUtf8 $ requestPath $ pendingRequest pendingConn
-      case decodeContextId (T.drop 1 path) of
+      let wspath = TE.decodeUtf8 $ requestPath $ pendingRequest pendingConn
+      case decodeContextId (T.drop 1 wspath) of
         Nothing -> do
           -- TODO: what happens to the client side?
           rejectRequest pendingConn "invalid ws path"
@@ -135,8 +135,8 @@ app AppConfig{..} rcfg cb = do
 -- | ReplicaApp
 
 data ReplicaApp = ReplicaApp
-  { actxConfig    :: ReplicaAppConfig
-  , actxOrphanCtx :: TVar (M.Map ContextID Context)
+  { rappConfig    :: ReplicaAppConfig
+  , rappOrphanCtx :: TVar (M.Map ContextID Context)
   }
 
 initializeReplicaApp :: ReplicaAppConfig -> IO ReplicaApp
@@ -147,10 +147,10 @@ initializeReplicaApp rcfg = do
 -- | Server-side rendering
 -- | For rare case, the application could end without generating.
 -- TODO: use appconfig inside ReplicaApp
-preRender :: ReplicaApp -> ReplicaAppConfig -> IO (Maybe (ContextID, V.HTML))
-preRender ReplicaApp{..} ReplicaAppConfig{..} =
+preRender :: ReplicaApp -> IO (Maybe (ContextID, V.HTML))
+preRender ReplicaApp{..} = do
   mask $ \restore -> do
-    s <- restore $ firstStep rcfgResourceAquire rcfgResourceRelease rcfgInitial rcfgStep
+    s <- restore $ firstStep' rappConfig
     case s of
       Nothing -> pure Nothing
       Just (initialVdom, startContext', _release) -> do
@@ -159,8 +159,11 @@ preRender ReplicaApp{..} ReplicaAppConfig{..} =
         -- Take care not to lost context, or else we'll leak threads.
         flip onException (killContext ctx) $ do
           ctxId <- genContextId
-          atomically $ modifyTVar' actxOrphanCtx $ M.insert ctxId ctx
+          atomically $ modifyTVar' rappOrphanCtx $ M.insert ctxId ctx
           pure $ Just (ctxId, initialVdom)
+  where
+    firstStep' ReplicaAppConfig{..} =
+      firstStep rcfgResourceAquire rcfgResourceRelease rcfgInitial rcfgStep
 
 -- | websocket に取り出す
 -- | 適切な例外対応が必要
