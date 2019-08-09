@@ -8,14 +8,14 @@ module Network.Wai.Handler.Replica where
 
 import qualified Chronos                        as Ch
 import           Torsor
-import           Control.Concurrent.Async       (Async, async, waitCatchSTM, race, cancel)
+import           Control.Concurrent.Async       (Async, async, waitCatchSTM, race, cancel, pollSTM)
 import           Control.Concurrent.STM         (TMVar, TQueue, TVar, STM, atomically, retry, check, throwSTM
                                                 , newTVar, readTVar, writeTVar, modifyTVar'
                                                 , newTMVar, newEmptyTMVar, tryPutTMVar, readTMVar, isEmptyTMVar
                                                 , newTQueue, writeTQueue, readTQueue)
-import           Control.Monad                  (join, forever, guard)
+import           Control.Monad                  (join, forever, guard, when)
 import           Control.Applicative            ((<|>))
-import           Control.Exception              (SomeException(SomeException),Exception, throwIO, evaluate, try, mask, mask_, onException, finally)
+import           Control.Exception              (SomeException(SomeException),Exception, throwIO, evaluate, try, mask, mask_, onException, finally, bracket)
 import           Crypto.Random                  (MonadRandom(..))
 
 import           Data.Aeson                     ((.:), (.=))
@@ -29,8 +29,9 @@ import qualified Data.Text.Encoding             as TE
 import qualified Data.Text.Lazy                 as TL
 import qualified Data.Text.Lazy.Builder         as TB
 import qualified Data.Map                       as M
-import           Data.Maybe                     (fromMaybe)
+import           Data.Maybe                     (fromMaybe, isJust)
 import           Data.Bool                      (bool)
+import           Data.Function                  ((&))
 import           Data.Void                      (Void, absurd)
 import           Data.IORef                     (newIORef, atomicModifyIORef)
 import           Network.HTTP.Types             (status200)
@@ -131,8 +132,9 @@ app AppConfig{..} rcfg cb = do
         Just ctxId -> do
           conn <- acceptRequest pendingConn
           forkPingThread conn 30
-          let ctx = undefined
-          r <- try $ attachContextToWebsocket conn ctx
+          r <- try
+            $ withContext rapp ctxId
+            $ \ctx -> attachContextToWebsocket conn ctx
           case r of
             Left (SomeException e)         -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
             Right (Just (SomeException e)) -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
@@ -146,7 +148,6 @@ app AppConfig{..} rcfg cb = do
 -- |
 -- |  1. orphan       アタッチされていない。Context は running/terminated 両方のケースがありうる
 -- |  2. attached     クライストにアタッチされている。基本running中だが、最初から terminated なものがアタッチされる可能性はある。
--- |  3. terminating  killContext 中の状態。kill が終了した段階で CtxMap から外される
 -- |
 -- | ※第三の状態、suspended (prerender はしたが、そこで止めている状態)も考えられるが、
 -- | そのような状態は基本初回接続までの間(ここで失敗するケースはレアケース)なので、管理
@@ -169,15 +170,40 @@ data ReplicaApp = ReplicaApp
 data ContextManageState
   = CMSOrphan
   | CMSAttached
-  | CMSTerminating
+  deriving (Eq, Show)
 
--- | STM's
+-- | STM primitives(privates)
 
 addOrphan :: ReplicaApp -> ContextID -> Context -> Ch.Time -> STM ()
 addOrphan ReplicaApp{..} ctxId ctx deadline = do
-  state <- newTVar CMSOrphan
-  modifyTVar' rappCtxMap  $ M.insert ctxId (ctx, state)
+  stateVar <- newTVar CMSOrphan
+  modifyTVar' rappCtxMap  $ M.insert ctxId (ctx, stateVar)
   modifyTVar' rappOrphans $ PSQ.insert ctxId deadline ()
+
+acquireContext :: ReplicaApp -> ContextID -> STM (Context, TVar ContextManageState)
+acquireContext ReplicaApp{..} ctxId = do
+  ctxMap          <- readTVar rappCtxMap
+  (ctx, stateVar) <- M.lookup ctxId ctxMap & maybe (throwSTM ContextDoesntExist) pure
+  state           <- readTVar stateVar
+  case state of
+    CMSAttached ->
+      throwSTM ContextAlreadyAttached
+    CMSOrphan   -> do
+      writeTVar stateVar CMSAttached
+      modifyTVar' rappOrphans $ PSQ.delete ctxId
+      pure (ctx, stateVar)
+
+releaseContext :: ReplicaApp ->  ContextID -> (Context, TVar ContextManageState) -> Ch.Time -> STM ()
+releaseContext ReplicaApp{..} ctxId (ctx, stateVar) deadline = do
+  b <- isTerminatedSTM ctx
+  if b
+    then modifyTVar' rappCtxMap $ M.delete ctxId
+    else do
+      writeTVar stateVar CMSOrphan
+      modifyTVar' rappOrphans $ PSQ.insert ctxId deadline ()
+
+
+-- |
 
 initializeReplicaApp :: ReplicaAppConfig -> IO ReplicaApp
 initializeReplicaApp rcfg =
@@ -193,9 +219,9 @@ preRender rapp@ReplicaApp{..} = do
     case s of
       Nothing -> pure Nothing
       Just (initialVdom, startContext', _release) -> do
-        -- NOTE: この実装方針で問題ないのか？
-        ctx <- startContext'
+        -- NOTE: _release は使わずに即コンテキストを動き始める。この実装方針で問題ないのか？
         -- Take care not to lost context, or else we'll leak threads.
+        ctx <- startContext'
         flip onException (killContext ctx) $ do
           ctxId <- genContextId
           curr <- Ch.now
@@ -207,15 +233,45 @@ preRender rapp@ReplicaApp{..} = do
     firstStep' ReplicaAppConfig{..} =
       firstStep rcfgResourceAquire rcfgResourceRelease rcfgInitial rcfgStep
 
-attach :: ReplicaApp -> ContextID -> (Context -> IO a) -> IO a
-attach = undefined
+data ReplicaAppError
+  = ContextDoesntExist
+  | ContextAlreadyAttached
+  deriving (Eq, Show)
+
+instance Exception ReplicaAppError
+
+-- | 取り出して
+-- |
+-- | 例外を投げるのは以下のケース
+-- |
+-- |  1) ContextID に対応する ctx が存在しない
+-- |  2) 存在するが、既に attached 状態である
+-- |  3) コンテキストを渡したコールバックが例外を投げた場合
+-- |
+-- | つまり値が帰るのは、コールバックが実行されかつ例外を投げることなく終了した場合のみ。
+-- | コールバックが終了(正常・異常終了両方でも)した時点でコテンキストも終了状態であれば、
+-- | 再度 orpohan にに戻さずコンテキストは破棄される。コンテキストが終了状態でなければ、
+-- | 再接続を待つため orphan として管理される。
+-- |
+-- | 例え orpahn 中にコンテキストが終了してしまったとしても callback は呼ばれる。
+-- |
+withContext :: ReplicaApp -> ContextID -> (Context -> IO a) -> IO a
+withContext rapp@ReplicaApp{..} ctxId cb = bracket req rel (cb . fst)
+  where
+    req = do
+      atomically $ acquireContext rapp ctxId
+    rel r = do
+      curr <- Ch.now
+      let deadline = rcfgWSInitialConnectLimit rappConfig `add` curr
+      atomically $ releaseContext rapp ctxId r deadline
 
 manageReplicaApp :: ReplicaApp -> IO Void
-manageReplicaApp axtx = undefined
+manageReplicaApp rapp = undefined
 
 newtype ContextID = ContextID B.ByteString
   deriving (Eq, Ord)
 
+contextIdByteLength :: Int
 contextIdByteLength = 32
 
 genContextId :: MonadRandom m => m ContextID
@@ -329,6 +385,11 @@ data Frame = Frame
 -- | Blocks until the context is actually terminated.
 killContext :: Context -> IO ()
 killContext Context{ctxThread} = cancel ctxThread
+
+-- | Check Context is terminated(gracefully or with exception)
+-- | Doesn't block.
+isTerminatedSTM :: Context -> STM Bool
+isTerminatedSTM Context{ctxThread} = isJust <$> pollSTM ctxThread
 
 -- | Execute the first step.
 --
