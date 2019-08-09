@@ -6,6 +6,8 @@
 
 module Network.Wai.Handler.Replica where
 
+import qualified Chronos                        as Ch
+import           Torsor
 import           Control.Concurrent.Async       (Async, async, waitCatchSTM, race, cancel)
 import           Control.Concurrent.STM         (TMVar, TQueue, TVar, STM, atomically, retry, check, throwSTM
                                                 , newTVar, readTVar, writeTVar, modifyTVar'
@@ -18,6 +20,7 @@ import           Crypto.Random                  (MonadRandom(..))
 
 import           Data.Aeson                     ((.:), (.=))
 import qualified Data.Aeson                     as A
+import qualified Data.OrdPSQ                    as PSQ
 
 import qualified Data.ByteString                as B
 import qualified Data.ByteString.Lazy           as BL
@@ -80,10 +83,12 @@ data AppConfig = AppConfig
   }
 
 data ReplicaAppConfig = forall st res. ReplicaAppConfig
-  { rcfgResourceAquire  :: IO res
-  , rcfgResourceRelease :: res -> IO ()
-  , rcfgInitial         :: res -> st
-  , rcfgStep            :: (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
+  { rcfgWSInitialConnectLimit    :: Ch.Timespan      -- ^ Time limit for first connect
+  , rcfgWSReconnectionSpanLimit  :: Ch.Timespan      -- ^ limit for re-connecting span
+  , rcfgResourceAquire           :: IO res
+  , rcfgResourceRelease          :: res -> IO ()
+  , rcfgInitial                  :: res -> st
+  , rcfgStep                     :: (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
   }
 
 -- | Create replica application.
@@ -100,8 +105,11 @@ app AppConfig{..} rcfg cb = do
       $ TB.toLazyText
       $ R.renderHTML html
 
-    wsPath :: ContextID -> T.Text
-    wsPath ctxId = "/" <> encodeContextId ctxId
+    encodeToWsPath :: ContextID -> T.Text
+    encodeToWsPath ctxId = "/" <> encodeContextId ctxId
+
+    decodeFromWsPath :: T.Text -> Maybe ContextID
+    decodeFromWsPath wspath = decodeContextId (T.drop 1 wspath)
 
     backupApp :: ReplicaApp -> Application
     backupApp rapp _req respond = do
@@ -110,13 +118,13 @@ app AppConfig{..} rcfg cb = do
         Nothing -> do
           respond $ responseLBS status200 [] ""
         Just (ctxId, body) -> do
-          let html = V.ssrHtml acfgTitle (wsPath ctxId) acfgHeader body
+          let html = V.ssrHtml acfgTitle (encodeToWsPath ctxId) acfgHeader body
           respond $ responseLBS status200 [("content-type", "text/html")] (renderHTML html)
 
     websocketApp :: ReplicaApp -> ServerApp
     websocketApp rapp pendingConn = do
       let wspath = TE.decodeUtf8 $ requestPath $ pendingRequest pendingConn
-      case decodeContextId (T.drop 1 wspath) of
+      case decodeFromWsPath wspath of
         Nothing -> do
           -- TODO: what happens to the client side?
           rejectRequest pendingConn "invalid ws path"
@@ -133,40 +141,72 @@ app AppConfig{..} rcfg cb = do
         closeCodeInternalError = 1011
 
 -- | ReplicaApp
+-- |
+-- | Context の状態(running, termianted) と直交して Context へのアタッチ状態を持つ
+-- |
+-- |  1. orphan       アタッチされていない。Context は running/terminated 両方のケースがありうる
+-- |  2. attached     クライストにアタッチされている。基本running中だが、最初から terminated なものがアタッチされる可能性はある。
+-- |  3. terminating  killContext 中の状態。kill が終了した段階で CtxMap から外される
+-- |
+-- | ※第三の状態、suspended (prerender はしたが、そこで止めている状態)も考えられるが、
+-- | そのような状態は基本初回接続までの間(ここで失敗するケースはレアケース)なので、管理
+-- | をややこしくするよりは、もう動かしておいて orphan 状態として扱ったほうがいいという
+-- | 判断をしている。
+-- |
+-- | ただしスクレイピングなど js が有効でない環境からのアクセスの場合があるので初回アタッチ
+-- | だけは時間厳しめでやったほうがいいかも。
+-- |
+-- |
+-- |
+-- |
 
 data ReplicaApp = ReplicaApp
-  { rappConfig    :: ReplicaAppConfig
-  , rappOrphanCtx :: TVar (M.Map ContextID Context)
+  { rappConfig  :: ReplicaAppConfig
+  , rappCtxMap  :: TVar (M.Map ContextID (Context, TVar ContextManageState))
+  , rappOrphans :: TVar (PSQ.OrdPSQ ContextID Ch.Time ())
   }
 
+data ContextManageState
+  = CMSOrphan
+  | CMSAttached
+  | CMSTerminating
+
+-- | STM's
+
+addOrphan :: ReplicaApp -> ContextID -> Context -> Ch.Time -> STM ()
+addOrphan ReplicaApp{..} ctxId ctx deadline = do
+  state <- newTVar CMSOrphan
+  modifyTVar' rappCtxMap  $ M.insert ctxId (ctx, state)
+  modifyTVar' rappOrphans $ PSQ.insert ctxId deadline ()
+
 initializeReplicaApp :: ReplicaAppConfig -> IO ReplicaApp
-initializeReplicaApp rcfg = do
-  m <- atomically $ newTVar mempty
-  pure $ ReplicaApp rcfg m
+initializeReplicaApp rcfg =
+  atomically $ ReplicaApp rcfg <$> newTVar mempty <*> newTVar PSQ.empty
 
 -- | Server-side rendering
 -- | For rare case, the application could end without generating.
 -- TODO: use appconfig inside ReplicaApp
 preRender :: ReplicaApp -> IO (Maybe (ContextID, V.HTML))
-preRender ReplicaApp{..} = do
+preRender rapp@ReplicaApp{..} = do
   mask $ \restore -> do
     s <- restore $ firstStep' rappConfig
     case s of
       Nothing -> pure Nothing
       Just (initialVdom, startContext', _release) -> do
-        -- TODO: relesase は不要かも。もう走らせてしまったほうがいいかも。
+        -- NOTE: この実装方針で問題ないのか？
         ctx <- startContext'
         -- Take care not to lost context, or else we'll leak threads.
         flip onException (killContext ctx) $ do
           ctxId <- genContextId
-          atomically $ modifyTVar' rappOrphanCtx $ M.insert ctxId ctx
+          curr <- Ch.now
+          let deadline = rcfgWSInitialConnectLimit rappConfig `add` curr
+          atomically $ addOrphan rapp ctxId ctx deadline
           pure $ Just (ctxId, initialVdom)
   where
+    -- let ReplicaAppConfig{..} = rappConfig だとエラーが出るので？
     firstStep' ReplicaAppConfig{..} =
       firstStep rcfgResourceAquire rcfgResourceRelease rcfgInitial rcfgStep
 
--- | websocket に取り出す
--- | 適切な例外対応が必要
 attach :: ReplicaApp -> ContextID -> (Context -> IO a) -> IO a
 attach = undefined
 

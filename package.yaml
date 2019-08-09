@@ -36,6 +36,9 @@ dependencies:
 - async
 - cryptonite
 - hex-text
+- chronos
+- torsor
+- psqueues
 
 library:
   source-dirs: src

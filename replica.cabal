@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 069ae66122de5a74ab8470b8592d4b0b3df4051bde44d3f5f0086821a665e8f6
+-- hash: 4a0355c991166429201c0ff24203c88dc8bcf1ae64802d41d6d11adc6b61c280
 
 name:           replica
 version:        0.1.0.0
@@ -45,14 +45,17 @@ library
     , async
     , base >=4.7 && <5
     , bytestring
+    , chronos
     , containers
     , cryptonite
     , file-embed
     , hex-text
     , http-types
+    , psqueues
     , stm
     , template-haskell
     , text
+    , torsor
     , wai
     , wai-websockets
     , websockets
@@ -73,16 +76,19 @@ test-suite replica-test
     , async
     , base >=4.7 && <5
     , bytestring
+    , chronos
     , containers
     , cryptonite
     , file-embed
     , hex-text
     , http-types
+    , psqueues
     , quickcheck-instances
     , replica
     , stm
     , template-haskell
     , text
+    , torsor
     , wai
     , wai-websockets
     , websockets
