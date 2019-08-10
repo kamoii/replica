@@ -263,7 +263,7 @@ function buildDOM(ws, dom, index, parent) {
 const CLOSE_CODE_NORMAL_CLOSURE = 1000;
 const CLOSE_CODE_INTERNAL_ERROR = 1011;
 // Path to connect. Includes information to attach to proper context.
-const WS_PATH_DATA_ATTR = 'replica-ws-path';
+const WS_PATH_DATA_ATTR = 'replicaWsPath';
 function connect() {
     // HTML render by SSR has one div and script for body's child.
     // let root = document.createElement('div');
