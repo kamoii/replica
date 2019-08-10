@@ -33,6 +33,7 @@ import qualified Data.Map                       as M
 import           Data.Maybe                     (fromMaybe, isJust)
 import           Data.Bool                      (bool)
 import           Data.Function                  ((&))
+import           Data.Foldable                  (for_)
 import           Data.Void                      (Void, absurd)
 import           Data.IORef                     (newIORef, atomicModifyIORef)
 import           Network.HTTP.Types             (status200)
@@ -165,8 +166,8 @@ app AppConfig{..} rcfg cb = do
 data ReplicaApp = ReplicaApp
   { rappConfig   :: ReplicaAppConfig
   , rappCtxMap   :: TVar (M.Map ContextID (Context, TVar ContextManageState))
-  , rappOrphans0 :: TVar (PSQ.OrdPSQ ContextID Ch.Time ())   -- ^ 初期接続待ち
-  , rappOrphans  :: TVar (PSQ.OrdPSQ ContextID Ch.Time ())   -- ^ 再接続待ち
+  , rappOrphans0 :: TVar (PSQ.OrdPSQ ContextID Ch.Time Context)   -- ^ 初期接続待ち
+  , rappOrphans  :: TVar (PSQ.OrdPSQ ContextID Ch.Time Context)   -- ^ 再接続待ち
   }
 
 data ContextManageState
@@ -177,11 +178,11 @@ data ContextManageState
 -- | STM primitives(privates)
 
 addOrphan :: ReplicaApp -> ContextID -> Context -> Ch.Time -> STM ()
-addOrphan ReplicaApp{..} ctxId ctx curr = do
-  let deadline = rcfgWSInitialConnectLimit rappConfig `add` curr
+addOrphan ReplicaApp{..} ctxId ctx now = do
+  let deadline = rcfgWSInitialConnectLimit rappConfig `add` now
   stateVar <- newTVar CMSOrphan
   modifyTVar' rappCtxMap   $ M.insert ctxId (ctx, stateVar)
-  modifyTVar' rappOrphans0 $ PSQ.insert ctxId deadline ()
+  modifyTVar' rappOrphans0 $ PSQ.insert ctxId deadline ctx
 
 acquireContext :: ReplicaApp -> ContextID -> STM (Context, TVar ContextManageState)
 acquireContext ReplicaApp{..} ctxId = do
@@ -198,18 +199,18 @@ acquireContext ReplicaApp{..} ctxId = do
       pure (ctx, stateVar)
 
 releaseContext :: ReplicaApp ->  ContextID -> (Context, TVar ContextManageState) -> Ch.Time -> STM ()
-releaseContext ReplicaApp{..} ctxId (ctx, stateVar) curr = do
-  let deadline = rcfgWSInitialConnectLimit rappConfig `add` curr
+releaseContext ReplicaApp{..} ctxId (ctx, stateVar) now = do
+  let deadline = rcfgWSInitialConnectLimit rappConfig `add` now
   b <- isTerminatedSTM ctx
   if b
     then modifyTVar' rappCtxMap $ M.delete ctxId
     else do
       writeTVar stateVar CMSOrphan
-      modifyTVar' rappOrphans $ PSQ.insert ctxId deadline ()
+      modifyTVar' rappOrphans $ PSQ.insert ctxId deadline ctx
 
 -- Get the most near deadline. Doesn't pop the queue.
 -- If the queue is empty, block till first item arrives.
-firstDeadline :: TVar (PSQ.OrdPSQ ContextID Ch.Time ()) -> STM Ch.Time
+firstDeadline :: TVar (PSQ.OrdPSQ k Ch.Time v) -> STM Ch.Time
 firstDeadline orphansVar = do
   orphans <- readTVar orphansVar
   case PSQ.findMin orphans of
@@ -217,9 +218,25 @@ firstDeadline orphansVar = do
     Just (_, t, _) -> pure t
 
 -- Targets to terminate. Targets are removed from rappCtxMap
-pickTargetOrphans :: ReplicaApp -> TVar (PSQ.OrdPSQ ContextID Ch.Time ()) -> Ch.Time -> STM [Context]
-pickTargetOrphans ReplicaApp{rappCtxMap} orphansVar curr = do
-  undefined
+-- 現在より 0.1s 以内のものはまとめて停止対象とする(
+pickTargetOrphans :: ReplicaApp -> TVar (PSQ.OrdPSQ ContextID Ch.Time Context) -> Ch.Time -> STM [Context]
+pickTargetOrphans ReplicaApp{rappCtxMap} orphansVar now = do
+  let dl = (100 `scale` millisecond) `add` now
+  orphans <- readTVar orphansVar
+  (orphans', targets) <- go dl orphans []
+  writeTVar orphansVar orphans'
+  pure targets
+  where
+    go deadline que acc = do
+      case PSQ.findMin que of
+        Just (ctxId, t, ctx)
+          | t <= deadline -> do
+              modifyTVar' rappCtxMap $ M.delete ctxId
+              go deadline (PSQ.deleteMin que) (ctx : acc)
+        _ -> pure (que, acc)
+
+    millisecond = Ch.Timespan (10^6)
+
 
 -- |
 
@@ -242,8 +259,8 @@ preRender rapp@ReplicaApp{rappConfig} = do
         ctx <- startContext'
         flip onException (killContext ctx) $ do
           ctxId <- genContextId
-          curr <- Ch.now
-          atomically $ addOrphan rapp ctxId ctx curr
+          now <- Ch.now
+          atomically $ addOrphan rapp ctxId ctx now
           pure $ Just (ctxId, initialVdom)
   where
     -- let ReplicaAppConfig{..} = rappConfig だとエラーが出るので？
@@ -278,19 +295,30 @@ withContext rapp ctxId cb = bracket req rel (cb . fst)
     req = do
       atomically $ acquireContext rapp ctxId
     rel r = do
-      curr <- Ch.now
-      atomically $ releaseContext rapp ctxId r curr
+      now <- Ch.now
+      atomically $ releaseContext rapp ctxId r now
 
 manageReplicaApp :: ReplicaApp -> IO Void
-manageReplicaApp rapp = do
-  undefined
+manageReplicaApp rapp@ReplicaApp{..} =
+  fromEither <$> race (orphanTerminator rappOrphans0) (orphanTerminator rappOrphans)
   where
-    orphanKiller :: TVar (PSQ.OrdPSQ ContextID Ch.Time ()) -> IO Void
-    orphanKiller queue = forever $ do
+    orphanTerminator :: TVar (PSQ.OrdPSQ ContextID Ch.Time Context) -> IO Void
+    orphanTerminator queue = forever $ do
       dl <- atomically $ firstDeadline queue
-      threadDelay undefined
-      curr <- now
-      undefined
+      now <- Ch.now
+      -- deadline まで時間があれば寝とく。初期接続と再接続のqueueを分離しているので
+      -- より近い deadline が割り込むことはない。
+      when (dl > now) $ do
+        let diff = dl `difference` now                          -- Timespan is nanosecond(10^-9)
+        threadDelay $ fromIntegral (Ch.getTimespan diff) * 1000 -- threadDelay recieves microseconds(10^-6)
+      mask_ $ do
+        -- 取り出した後に terminate が実行できないと leak するので mask の中で。
+        -- ゼロ件の可能性もあるので注意(直近の deadline のものが attach された場合)
+        orphans <- atomically $ pickTargetOrphans rapp queue (max dl now)
+        for_ orphans $ \oc -> async $ killContext oc             -- TODO: 確実に terminate したか確認したほうがいい？
+
+    fromEither (Left a)  = a
+    fromEither (Right a) = a
 
 
 newtype ContextID = ContextID B.ByteString
