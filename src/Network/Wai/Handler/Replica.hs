@@ -7,7 +7,7 @@
 module Network.Wai.Handler.Replica where
 
 import qualified Chronos                        as Ch
-import           Torsor
+import           Torsor                         (add, difference, scale)
 import           Control.Concurrent             (threadDelay)
 import           Control.Concurrent.Async       (Async, async, waitCatchSTM, race, cancel, pollSTM)
 import           Control.Concurrent.STM         (TMVar, TQueue, TVar, STM, atomically, retry, check, throwSTM
@@ -17,7 +17,7 @@ import           Control.Concurrent.STM         (TMVar, TQueue, TVar, STM, atomi
 import           Control.Monad                  (join, forever, guard, when)
 import           Control.Applicative            ((<|>))
 import           Control.Exception              (SomeException(SomeException),Exception, throwIO, evaluate, try, mask, mask_, onException, finally, bracket)
-import           Crypto.Random                  (MonadRandom(..))
+import           Crypto.Random                  (MonadRandom(getRandomBytes))
 
 import           Data.Aeson                     ((.:), (.=))
 import qualified Data.Aeson                     as A
@@ -30,7 +30,7 @@ import qualified Data.Text.Encoding             as TE
 import qualified Data.Text.Lazy                 as TL
 import qualified Data.Text.Lazy.Builder         as TB
 import qualified Data.Map                       as M
-import           Data.Maybe                     (fromMaybe, isJust)
+import           Data.Maybe                     (isJust)
 import           Data.Bool                      (bool)
 import           Data.Function                  ((&))
 import           Data.Foldable                  (for_)
@@ -235,7 +235,7 @@ pickTargetOrphans ReplicaApp{rappCtxMap} orphansVar now = do
               go deadline (PSQ.deleteMin que) (ctx : acc)
         _ -> pure (que, acc)
 
-    millisecond = Ch.Timespan (10^6)
+    millisecond = Ch.Timespan 1000000
 
 
 -- |
