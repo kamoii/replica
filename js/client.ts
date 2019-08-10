@@ -397,9 +397,10 @@ const WS_PATH_DATA_ATTR = 'replica-ws-path'
 
 function connect() {
   // HTML render by SSR has one div and script for body's child.
-  let root = document.createElement('div');
-  document.body.appendChild(root);
-  const wsPath = "/fooo" // TODO:
+  // let root = document.createElement('div');
+  // document.body.appendChild(root);
+  let root = document.body.firstChild as Element
+  const wsPath = document.body.dataset[WS_PATH_DATA_ATTR]
   const port = window.location.port ? window.location.port : (window.location.protocol === 'http' ? 80 : 443);
   const ws = new WebSocket("ws://" + window.location.hostname + ":" + port + wsPath);
 

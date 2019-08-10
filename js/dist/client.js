@@ -262,11 +262,16 @@ function buildDOM(ws, dom, index, parent) {
 // https://tools.ietf.org/html/rfc6455#section-7.4
 const CLOSE_CODE_NORMAL_CLOSURE = 1000;
 const CLOSE_CODE_INTERNAL_ERROR = 1011;
+// Path to connect. Includes information to attach to proper context.
+const WS_PATH_DATA_ATTR = 'replica-ws-path';
 function connect() {
-    let root = document.createElement('div');
+    // HTML render by SSR has one div and script for body's child.
+    // let root = document.createElement('div');
+    // document.body.appendChild(root);
+    let root = document.body.firstChild;
+    const wsPath = document.body.dataset[WS_PATH_DATA_ATTR];
     const port = window.location.port ? window.location.port : (window.location.protocol === 'http' ? 80 : 443);
-    const ws = new WebSocket("ws://" + window.location.hostname + ":" + port);
-    document.body.appendChild(root);
+    const ws = new WebSocket("ws://" + window.location.hostname + ":" + port + wsPath);
     ws.onmessage = (event) => {
         const update = JSON.parse(event.data);
         switch (update.type) {
