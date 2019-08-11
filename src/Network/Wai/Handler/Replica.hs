@@ -196,9 +196,9 @@ rlogToText (ReplicaInfoLog l) = case l of
   InfoBackToOrphan ctxId    -> "Back to orphan: " <> encodeContextId ctxId
   InfoOrpanTerminated ctxId -> "Orphan terminated: " <> encodeContextId ctxId
   where
-    jstOffset = Ch.Offset 9
+    jstOffset = Ch.Offset (9 * 60)
     encodeTime time =
-      Ch.encode_DmyHMSz offsetFormat subsecondPrecision Ch.w3c offsetDatetime
+      Ch.encode_YmdHMSz offsetFormat subsecondPrecision Ch.w3c offsetDatetime
       where
         offsetDatetime     = Ch.timeToOffsetDatetime jstOffset time
         offsetFormat       = Ch.OffsetFormatColonOff
