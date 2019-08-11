@@ -179,6 +179,7 @@ data ContextManageState
 
 data ReplicaLog
   = ReplicaInfoLog ReplicaInfoLog
+  | ReplicaDebugLog T.Text
 
 data ReplicaInfoLog
   = InfoOrphanAdded ContextID Ch.Time
@@ -188,26 +189,28 @@ data ReplicaInfoLog
 
 rlogSeverity :: ReplicaLog -> Co.Severity
 rlogSeverity (ReplicaInfoLog _) = Co.Info
+rlogSeverity (ReplicaDebugLog _) = Co.Debug
 
 rlogToText :: ReplicaLog -> T.Text
+rlogToText (ReplicaDebugLog t) = t
 rlogToText (ReplicaInfoLog l) = case l of
   InfoOrphanAdded ctxId dl  -> "New orpahan addded: " <> encodeContextId ctxId <> ", deadline: " <> encodeTime dl
   InfoOrpanAttached ctxId   -> "Orphan attaced: " <> encodeContextId ctxId
   InfoBackToOrphan ctxId    -> "Back to orphan: " <> encodeContextId ctxId
   InfoOrpanTerminated ctxId -> "Orphan terminated: " <> encodeContextId ctxId
-  where
-    jstOffset = Ch.Offset (9 * 60)
-    encodeTime time =
-      Ch.encode_YmdHMSz offsetFormat subsecondPrecision Ch.w3c offsetDatetime
-      where
-        offsetDatetime     = Ch.timeToOffsetDatetime jstOffset time
-        offsetFormat       = Ch.OffsetFormatColonOff
-        subsecondPrecision = Ch.SubsecondPrecisionFixed 2
-
 
 rlog :: ReplicaApp -> ReplicaLog -> IO ()
 rlog ReplicaApp{ rappConfig = ReplicaAppConfig{rcfgLogAction} } message =
   rcfgLogAction Co.<& message
+
+encodeTime :: Ch.Time -> T.Text
+encodeTime time =
+  Ch.encode_YmdHMSz offsetFormat subsecondPrecision Ch.w3c offsetDatetime
+  where
+    jstOffset          = Ch.Offset (9 * 60)
+    offsetDatetime     = Ch.timeToOffsetDatetime jstOffset time
+    offsetFormat       = Ch.OffsetFormatColonOff
+    subsecondPrecision = Ch.SubsecondPrecisionFixed 2
 
 -- | STM primitives(privates)
 
@@ -348,12 +351,14 @@ manageReplicaApp rapp@ReplicaApp{..} =
     orphanTerminator :: TVar (PSQ.OrdPSQ ContextID Ch.Time Context) -> IO Void
     orphanTerminator queue = forever $ do
       dl <- atomically $ firstDeadline queue
+      rlog rapp $ ReplicaDebugLog $ "Nearest deade line: " <> encodeTime dl
       now <- Ch.now
       -- deadline まで時間があれば寝とく。初期接続と再接続のqueueを分離しているので
       -- より近い deadline が割り込むことはない。
       when (dl > now) $ do
         let diff = dl `difference` now                          -- Timespan is nanosecond(10^-9)
-        threadDelay $ fromIntegral (Ch.getTimespan diff) * 1000 -- threadDelay recieves microseconds(10^-6)
+        rlog rapp $ ReplicaDebugLog $ "Waiting for " <> T.pack (show diff) <> " nanoseconds"
+        threadDelay $ fromIntegral (Ch.getTimespan diff) `div` 1000 -- threadDelay recieves microseconds(10^-6)
       mask_ $ do
         -- 取り出した後に terminate が実行できないと leak するので mask の中で。
         -- ゼロ件の可能性もあるので注意(直近の deadline のものが attach された場合)
