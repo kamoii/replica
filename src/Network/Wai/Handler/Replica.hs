@@ -203,6 +203,9 @@ rlog :: ReplicaApp -> ReplicaLog -> IO ()
 rlog ReplicaApp{ rappConfig = ReplicaAppConfig{rcfgLogAction} } message =
   rcfgLogAction Co.<& message
 
+rlogDebug :: ReplicaApp -> T.Text -> IO ()
+rlogDebug rapp txt = rlog rapp (ReplicaDebugLog txt)
+
 encodeTime :: Ch.Time -> T.Text
 encodeTime time =
   Ch.encode_YmdHMSz offsetFormat subsecondPrecision Ch.w3c offsetDatetime
@@ -351,13 +354,13 @@ manageReplicaApp rapp@ReplicaApp{..} =
     orphanTerminator :: TVar (PSQ.OrdPSQ ContextID Ch.Time Context) -> IO Void
     orphanTerminator queue = forever $ do
       dl <- atomically $ firstDeadline queue
-      rlog rapp $ ReplicaDebugLog $ "Nearest deade line: " <> encodeTime dl
+      rlogDebug rapp $ "Nearest deade line: " <> encodeTime dl
       now <- Ch.now
       -- deadline まで時間があれば寝とく。初期接続と再接続のqueueを分離しているので
       -- より近い deadline が割り込むことはない。
       when (dl > now) $ do
         let diff = dl `difference` now                          -- Timespan is nanosecond(10^-9)
-        rlog rapp $ ReplicaDebugLog $ "Waiting for " <> T.pack (show diff) <> " nanoseconds"
+        rlogDebug rapp $ "Waiting for " <> T.pack (show diff) <> " nanoseconds"
         threadDelay $ fromIntegral (Ch.getTimespan diff) `div` 1000 -- threadDelay recieves microseconds(10^-6)
       mask_ $ do
         -- 取り出した後に terminate が実行できないと leak するので mask の中で。
