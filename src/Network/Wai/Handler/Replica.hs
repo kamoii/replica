@@ -181,10 +181,28 @@ data ReplicaLog
   = ReplicaInfoLog ReplicaInfoLog
 
 data ReplicaInfoLog
-  = InfoOrphanAdded ContextID
+  = InfoOrphanAdded ContextID Ch.Time
   | InfoOrpanAttached ContextID
   | InfoBackToOrphan ContextID
   | InfoOrpanTerminated ContextID
+
+rlogSeverity :: ReplicaLog -> Co.Severity
+rlogSeverity (ReplicaInfoLog _) = Co.Info
+
+rlogToText :: ReplicaLog -> T.Text
+rlogToText (ReplicaInfoLog l) = case l of
+  InfoOrphanAdded ctxId dl  -> "New orpahan addded: " <> encodeContextId ctxId <> ", deadline: " <> encodeTime dl
+  InfoOrpanAttached ctxId   -> "Orphan attaced: " <> encodeContextId ctxId
+  InfoBackToOrphan ctxId    -> "Back to orphan: " <> encodeContextId ctxId
+  InfoOrpanTerminated ctxId -> "Orphan terminated: " <> encodeContextId ctxId
+  where
+    jstOffset = Ch.Offset 9
+    encodeTime time =
+      Ch.encode_DmyHMSz offsetFormat subsecondPrecision Ch.w3c offsetDatetime
+      where
+        offsetDatetime     = Ch.timeToOffsetDatetime jstOffset time
+        offsetFormat       = Ch.OffsetFormatColonOff
+        subsecondPrecision = Ch.SubsecondPrecisionFixed 2
 
 
 rlog :: ReplicaApp -> ReplicaLog -> IO ()
@@ -193,12 +211,14 @@ rlog ReplicaApp{ rappConfig = ReplicaAppConfig{rcfgLogAction} } message =
 
 -- | STM primitives(privates)
 
-addOrphan :: ReplicaApp -> ContextID -> Context -> Ch.Time -> STM ()
+-- returns deadline
+addOrphan :: ReplicaApp -> ContextID -> Context -> Ch.Time -> STM Ch.Time
 addOrphan ReplicaApp{..} ctxId ctx now = do
   let deadline = rcfgWSInitialConnectLimit rappConfig `add` now
   stateVar <- newTVar CMSOrphan
   modifyTVar' rappCtxMap   $ M.insert ctxId (ctx, stateVar)
   modifyTVar' rappOrphans0 $ PSQ.insert ctxId deadline ctx
+  pure deadline
 
 acquireContext :: ReplicaApp -> ContextID -> STM (Context, TVar ContextManageState)
 acquireContext ReplicaApp{..} ctxId = do
@@ -280,8 +300,8 @@ preRender rapp@ReplicaApp{rappConfig} = do
         flip onException (killContext ctx) $ do
           ctxId <- genContextId
           now <- Ch.now
-          atomically $ addOrphan rapp ctxId ctx now
-          rlog rapp $ ReplicaInfoLog $ InfoOrphanAdded ctxId
+          dl <- atomically $ addOrphan rapp ctxId ctx now
+          rlog rapp $ ReplicaInfoLog $ InfoOrphanAdded ctxId dl
           pure $ Just (ctxId, initialVdom)
   where
     -- let ReplicaAppConfig{..} = rappConfig だとエラーが出るので？
@@ -350,7 +370,7 @@ newtype ContextID = ContextID B.ByteString
   deriving (Eq, Ord)
 
 contextIdByteLength :: Int
-contextIdByteLength = 32
+contextIdByteLength = 16
 
 genContextId :: MonadRandom m => m ContextID
 genContextId = ContextID <$> getRandomBytes contextIdByteLength
