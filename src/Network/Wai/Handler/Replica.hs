@@ -6,6 +6,7 @@
 
 module Network.Wai.Handler.Replica where
 
+import qualified Colog.Core                     as Co
 import qualified Chronos                        as Ch
 import           Torsor                         (add, difference, scale)
 import           Control.Concurrent             (threadDelay)
@@ -86,7 +87,8 @@ data AppConfig = AppConfig
   }
 
 data ReplicaAppConfig = forall st res. ReplicaAppConfig
-  { rcfgWSInitialConnectLimit    :: Ch.Timespan      -- ^ Time limit for first connect
+  { rcfgLogAction                :: Co.LogAction IO ReplicaLog
+  , rcfgWSInitialConnectLimit    :: Ch.Timespan      -- ^ Time limit for first connect
   , rcfgWSReconnectionSpanLimit  :: Ch.Timespan      -- ^ limit for re-connecting span
   , rcfgResourceAquire           :: IO res
   , rcfgResourceRelease          :: res -> IO ()
@@ -175,6 +177,20 @@ data ContextManageState
   | CMSAttached
   deriving (Eq, Show)
 
+data ReplicaLog
+  = ReplicaInfoLog ReplicaInfoLog
+
+data ReplicaInfoLog
+  = InfoOrphanAdded ContextID
+  | InfoOrpanAttached ContextID
+  | InfoBackToOrphan ContextID
+  | InfoOrpanTerminated ContextID
+
+
+rlog :: ReplicaApp -> ReplicaLog -> IO ()
+rlog ReplicaApp{ rappConfig = ReplicaAppConfig{rcfgLogAction} } message =
+  rcfgLogAction Co.<& message
+
 -- | STM primitives(privates)
 
 addOrphan :: ReplicaApp -> ContextID -> Context -> Ch.Time -> STM ()
@@ -219,7 +235,11 @@ firstDeadline orphansVar = do
 
 -- Targets to terminate. Targets are removed from rappCtxMap
 -- 現在より 0.1s 以内のものはまとめて停止対象とする(
-pickTargetOrphans :: ReplicaApp -> TVar (PSQ.OrdPSQ ContextID Ch.Time Context) -> Ch.Time -> STM [Context]
+pickTargetOrphans
+  :: ReplicaApp
+  -> TVar (PSQ.OrdPSQ ContextID Ch.Time Context)
+  -> Ch.Time
+  -> STM [(ContextID, Context)]
 pickTargetOrphans ReplicaApp{rappCtxMap} orphansVar now = do
   let dl = (100 `scale` millisecond) `add` now
   orphans <- readTVar orphansVar
@@ -232,7 +252,7 @@ pickTargetOrphans ReplicaApp{rappCtxMap} orphansVar now = do
         Just (ctxId, t, ctx)
           | t <= deadline -> do
               modifyTVar' rappCtxMap $ M.delete ctxId
-              go deadline (PSQ.deleteMin que) (ctx : acc)
+              go deadline (PSQ.deleteMin que) ((ctxId,ctx) : acc)
         _ -> pure (que, acc)
 
     millisecond = Ch.Timespan 1000000
@@ -261,6 +281,7 @@ preRender rapp@ReplicaApp{rappConfig} = do
           ctxId <- genContextId
           now <- Ch.now
           atomically $ addOrphan rapp ctxId ctx now
+          rlog rapp $ ReplicaInfoLog $ InfoOrphanAdded ctxId
           pure $ Just (ctxId, initialVdom)
   where
     -- let ReplicaAppConfig{..} = rappConfig だとエラーが出るので？
@@ -293,10 +314,12 @@ withContext :: ReplicaApp -> ContextID -> (Context -> IO a) -> IO a
 withContext rapp ctxId cb = bracket req rel (cb . fst)
   where
     req = do
-      atomically $ acquireContext rapp ctxId
+      atomically (acquireContext rapp ctxId)
+        <* rlog rapp (ReplicaInfoLog (InfoOrpanAttached ctxId))
     rel r = do
       now <- Ch.now
-      atomically $ releaseContext rapp ctxId r now
+      atomically (releaseContext rapp ctxId r now)
+        <* rlog rapp (ReplicaInfoLog (InfoBackToOrphan ctxId))
 
 manageReplicaApp :: ReplicaApp -> IO Void
 manageReplicaApp rapp@ReplicaApp{..} =
@@ -315,7 +338,9 @@ manageReplicaApp rapp@ReplicaApp{..} =
         -- 取り出した後に terminate が実行できないと leak するので mask の中で。
         -- ゼロ件の可能性もあるので注意(直近の deadline のものが attach された場合)
         orphans <- atomically $ pickTargetOrphans rapp queue (max dl now)
-        for_ orphans $ \oc -> async $ killContext oc             -- TODO: 確実に terminate したか確認したほうがいい？
+        -- TODO: 確実に terminate したか確認したほうがいい？
+        for_ orphans $ \(ctxId,ctx) -> async
+          $ killContext ctx <* rlog rapp (ReplicaInfoLog (InfoOrpanTerminated ctxId))
 
     fromEither (Left a)  = a
     fromEither (Right a) = a

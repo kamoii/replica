@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 4a0355c991166429201c0ff24203c88dc8bcf1ae64802d41d6d11adc6b61c280
+-- hash: a07cba4581ab75a227e408f5f17f35f71fafb9656d6f4af9ac9beb5c1e0d73d2
 
 name:           replica
 version:        0.1.0.0
@@ -46,6 +46,7 @@ library
     , base >=4.7 && <5
     , bytestring
     , chronos
+    , co-log-core
     , containers
     , cryptonite
     , file-embed
@@ -77,6 +78,7 @@ test-suite replica-test
     , base >=4.7 && <5
     , bytestring
     , chronos
+    , co-log-core
     , containers
     , cryptonite
     , file-embed

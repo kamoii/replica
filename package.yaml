@@ -39,6 +39,7 @@ dependencies:
 - chronos
 - torsor
 - psqueues
+- co-log-core
 
 library:
   source-dirs: src
