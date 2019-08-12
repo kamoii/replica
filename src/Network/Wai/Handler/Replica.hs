@@ -17,7 +17,7 @@ import           Control.Concurrent.STM         (TMVar, TQueue, TVar, STM, atomi
                                                 , newTQueue, writeTQueue, readTQueue)
 import           Control.Monad                  (join, forever, guard, when)
 import           Control.Applicative            ((<|>))
-import           Control.Exception              (SomeException(SomeException),Exception, throwIO, evaluate, try, mask, mask_, onException, finally, bracket)
+import           Control.Exception              (catch, SomeException(SomeException),Exception, throwIO, evaluate, try, mask, mask_, onException, finally, bracket)
 import           Crypto.Random                  (MonadRandom(getRandomBytes))
 
 import           Data.Aeson                     ((.:), (.=))
@@ -40,6 +40,7 @@ import           Data.IORef                     (newIORef, atomicModifyIORef)
 import           Network.HTTP.Types             (status200)
 
 import           Network.WebSockets             (ServerApp, requestPath)
+import qualified Network.WebSockets             as WS
 import           Network.WebSockets.Connection  (ConnectionOptions, Connection, pendingRequest, rejectRequest, acceptRequest, forkPingThread, receiveData, sendTextData, sendClose, sendCloseCode)
 import           Network.Wai                    (Application, Middleware, responseLBS)
 import           Network.Wai.Handler.WebSockets (websocketsOr)
@@ -140,10 +141,21 @@ app AppConfig{..} rcfg cb = do
             $ withContext rapp ctxId
             $ \ctx -> attachContextToWebsocket conn ctx
           case r of
-            Left (SomeException e)         -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
-            Right (Just (SomeException e)) -> sendCloseCode conn closeCodeInternalError (T.pack $ show e)
-            Right _                        -> sendClose conn ("done" :: T.Text)
+            Left (SomeException e')         ->
+              throwIO e'
+                `catch` do \(e :: ContextAttachingError)  -> sendIECloseCode conn e -- Rare.
+                `catch` do \(e :: ContextEventError)      -> sendIECloseCode conn e -- Rare. Problem occuered while event displatching/pasring.
+                `catch` do \(e :: WS.ConnectionException) -> -- Websocket(https://github.com/jaspervdj/websockets/blob/0f7289b2b5426985046f1733413bb00012a27537/src/Network/WebSockets/Types.hs#L141)
+                             case e of
+                               WS.CloseRequest _ _       -> pure ()   -- ???. Connection closedd intentonaly by client. Terminated Context?
+                               WS.ConnectionClosed       -> pure ()   -- Most of the time. Connetion closed by TCP level unintentionaly.
+                               WS.ParseException _       -> sendIECloseCode conn e -- Rare.
+                               WS.UnicodeException _     -> sendIECloseCode conn e -- Rare.
+                `catch` do \(e :: SomeException)          -> sendIECloseCode conn e -- Rare. ??? don't know what happened
+            Right (Just (SomeException e))               -> sendIECloseCode conn e -- Maybe? Context ended by exception.
+            Right Nothing                                -> sendClose conn ("done" :: T.Text) -- Rare. Context ended gracefully
       where
+        sendIECloseCode conn e = sendCloseCode conn closeCodeInternalError (T.pack $ show e)
         closeCodeInternalError = 1011
 
 -- | ReplicaApp
@@ -314,12 +326,12 @@ preRender rapp@ReplicaApp{rappConfig} = do
     firstStep' ReplicaAppConfig{..} =
       firstStep rcfgResourceAquire rcfgResourceRelease rcfgInitial rcfgStep
 
-data ReplicaAppError
+data ContextAttachingError
   = ContextDoesntExist
   | ContextAlreadyAttached
   deriving (Eq, Show)
 
-instance Exception ReplicaAppError
+instance Exception ContextAttachingError
 
 -- | 取り出して
 -- |
@@ -354,13 +366,11 @@ manageReplicaApp rapp@ReplicaApp{..} =
     orphanTerminator :: TVar (PSQ.OrdPSQ ContextID Ch.Time Context) -> IO Void
     orphanTerminator queue = forever $ do
       dl <- atomically $ firstDeadline queue
-      rlogDebug rapp $ "Nearest deade line: " <> encodeTime dl
       now <- Ch.now
       -- deadline まで時間があれば寝とく。初期接続と再接続のqueueを分離しているので
       -- より近い deadline が割り込むことはない。
       when (dl > now) $ do
         let diff = dl `difference` now                          -- Timespan is nanosecond(10^-9)
-        rlogDebug rapp $ "Waiting for " <> T.pack (show diff) <> " nanoseconds"
         threadDelay $ fromIntegral (Ch.getTimespan diff) `div` 1000 -- threadDelay recieves microseconds(10^-6)
       mask_ $ do
         -- 取り出した後に terminate が実行できないと leak するので mask の中で。
@@ -395,13 +405,13 @@ decodeContextId t = do
 
 -- These exceptions are not to ment recoverable. Should stop the context.
 -- TODO: Make it more rich to make debug easier?
--- TODO: Split to ContextError and ProtocolError
-data ContextError
+-- TODO: Split to ContextEventError and ProtocolError
+data ContextEventError
   = IllformedData
   | InvalidEvent
   deriving Show
 
-instance Exception ContextError
+instance Exception ContextEventError
 
 -- | Attacehes context to webcoket connection
 --
