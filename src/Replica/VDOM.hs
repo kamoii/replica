@@ -72,7 +72,7 @@ ssrHtml title wsPath header body =
   , VNode "html" mempty
       [ VNode "head" mempty ([VNode "title" mempty [VText title]] <> header)
       , VNode "body" (fl [("data-replica-ws-path", AText wsPath)])
-          [ VNode "div" mempty body
+          [ VNode "div" (fl [("data-app", AText "replica")]) body
           , VNode "script" (fl [("language", AText "javascript")])
               [ VRawText $ T.decodeUtf8 clientDriver ]
           ]

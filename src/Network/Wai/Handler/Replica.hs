@@ -1,3 +1,4 @@
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings   #-}
@@ -41,7 +42,7 @@ import           Network.HTTP.Types             (status200)
 
 import           Network.WebSockets             (ServerApp, requestPath)
 import qualified Network.WebSockets             as WS
-import           Network.WebSockets.Connection  (ConnectionOptions, Connection, pendingRequest, rejectRequest, acceptRequest, forkPingThread, receiveData, sendTextData, sendClose, sendCloseCode)
+import           Network.WebSockets.Connection  (ConnectionOptions, Connection, pendingRequest, rejectRequest, acceptRequest, forkPingThread, receiveData, receiveDataMessage, sendTextData, sendClose, sendCloseCode)
 import           Network.Wai                    (Application, Middleware, responseLBS)
 import           Network.Wai.Handler.WebSockets (websocketsOr)
 import           Text.Hex                       (encodeHex, decodeHex)
@@ -137,9 +138,11 @@ app AppConfig{..} rcfg cb = do
         Just ctxId -> do
           conn <- acceptRequest pendingConn
           forkPingThread conn 30
+          debugLog $ "WS started with contextId: " <> encodeContextId ctxId
           r <- try
             $ withContext rapp ctxId
             $ \ctx -> attachContextToWebsocket conn ctx
+          debugLog $ "WS ended with: " <> T.pack (show r)
           case r of
             Left (SomeException e')         ->
               throwIO e'
@@ -153,10 +156,33 @@ app AppConfig{..} rcfg cb = do
                                WS.UnicodeException _     -> sendIECloseCode conn e -- Rare.
                 `catch` do \(e :: SomeException)          -> sendIECloseCode conn e -- Rare. ??? don't know what happened
             Right (Just (SomeException e))               -> sendIECloseCode conn e -- Maybe? Context ended by exception.
-            Right Nothing                                -> sendClose conn ("done" :: T.Text) -- Rare. Context ended gracefully
+            Right Nothing                                -> normalClosure conn -- Rare. Context ended gracefully
       where
-        sendIECloseCode conn e = sendCloseCode conn closeCodeInternalError (T.pack $ show e)
+        sendIECloseCode conn e = do
+          _ <- try @SomeException $ sendCloseCode conn closeCodeInternalError (T.pack $ show e)
+          recieveCloseCode conn
+          rlog rapp $ ReplicaWarnLog $ WarnWSClosedByInternalError (show e)
+
+        -- TODO: 何故か ブラウザ側は 1006、つまりブチ切り扱いにされる
+        -- 多分 conn で recieve しているところを非同期例外で止めてるから？
+        -- https://github.com/jaspervdj/websockets/issues/182
+        -- recieveData を非同期例外で止めると、その後 connection が生きているのに sendClose しようとすると
+        -- ConnectionClosed 例外が発生する。
+        normalClosure conn = do
+          _ <- try @SomeException $ sendClose conn ("done" :: T.Text)
+          recieveCloseCode conn
+          debugLog "Closing gracefully"
+
+        -- After sending client the close code, we need to recieve
+        -- close packet from client. If we don't do this and
+        -- immideatly closed the tcp connection, it'll be an abnormal
+        -- closure from client pov.
+        recieveCloseCode conn = do
+          _ <- try @SomeException $ forever $ receiveDataMessage conn
+          pure ()
+
         closeCodeInternalError = 1011
+        debugLog = rlog rapp . ReplicaDebugLog
 
 -- | ReplicaApp
 -- |
@@ -190,8 +216,9 @@ data ContextManageState
   deriving (Eq, Show)
 
 data ReplicaLog
-  = ReplicaInfoLog ReplicaInfoLog
-  | ReplicaDebugLog T.Text
+  = ReplicaDebugLog T.Text
+  | ReplicaInfoLog  ReplicaInfoLog
+  | ReplicaWarnLog  ReplicaWarnLog
 
 data ReplicaInfoLog
   = InfoOrphanAdded ContextID Ch.Time
@@ -199,17 +226,23 @@ data ReplicaInfoLog
   | InfoBackToOrphan ContextID
   | InfoOrpanTerminated ContextID
 
+data ReplicaWarnLog
+  = WarnWSClosedByInternalError String
+
 rlogSeverity :: ReplicaLog -> Co.Severity
 rlogSeverity (ReplicaInfoLog _) = Co.Info
 rlogSeverity (ReplicaDebugLog _) = Co.Debug
+rlogSeverity (ReplicaWarnLog _) = Co.Warning
 
 rlogToText :: ReplicaLog -> T.Text
 rlogToText (ReplicaDebugLog t) = t
-rlogToText (ReplicaInfoLog l) = case l of
-  InfoOrphanAdded ctxId dl  -> "New orpahan addded: " <> encodeContextId ctxId <> ", deadline: " <> encodeTime dl
-  InfoOrpanAttached ctxId   -> "Orphan attaced: " <> encodeContextId ctxId
-  InfoBackToOrphan ctxId    -> "Back to orphan: " <> encodeContextId ctxId
-  InfoOrpanTerminated ctxId -> "Orphan terminated: " <> encodeContextId ctxId
+rlogToText (ReplicaInfoLog l)  = case l of
+  InfoOrphanAdded ctxId dl        -> "New orpahan addded: " <> encodeContextId ctxId <> ", deadline: " <> encodeTime dl
+  InfoOrpanAttached ctxId         -> "Orphan attaced: " <> encodeContextId ctxId
+  InfoBackToOrphan ctxId          -> "Back to orphan: " <> encodeContextId ctxId
+  InfoOrpanTerminated ctxId       -> "Orphan terminated: " <> encodeContextId ctxId
+rlogToText (ReplicaWarnLog l)  = case l of
+  WarnWSClosedByInternalError mes -> "Closed websocket connecion by internal error: " <> T.pack mes
 
 rlog :: ReplicaApp -> ReplicaLog -> IO ()
 rlog ReplicaApp{ rappConfig = ReplicaAppConfig{rcfgLogAction} } message =

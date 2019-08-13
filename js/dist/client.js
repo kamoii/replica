@@ -261,14 +261,33 @@ function buildDOM(ws, dom, index, parent) {
 // https://developer.mozilla.org/en-US/docs/Web/API/CloseEvent
 // https://tools.ietf.org/html/rfc6455#section-7.4
 const CLOSE_CODE_NORMAL_CLOSURE = 1000;
+const CLOSE_CODE_ABNORMAL_CLOSURE = 1006;
 const CLOSE_CODE_INTERNAL_ERROR = 1011;
 // Path to connect. Includes information to attach to proper context.
 const WS_PATH_DATA_ATTR = 'replicaWsPath';
+function findRootNode() {
+    const cs = document.body.childNodes;
+    for (let i = 0; i < cs.length; i++) {
+        const c = cs[i];
+        if (c instanceof HTMLElement) {
+            const e = c;
+            if (e.dataset["app"] == "replica") {
+                return e;
+            }
+        }
+    }
+    return null;
+}
 function connect() {
     // HTML render by SSR has one div and script for body's child.
     // let root = document.createElement('div');
     // document.body.appendChild(root);
-    let root = document.body.firstChild;
+    let root_ = findRootNode();
+    if (root_ == null) {
+        alert("Root node not found.");
+        return;
+    }
+    let root = root_;
     const wsPath = document.body.dataset[WS_PATH_DATA_ATTR];
     const port = window.location.port ? window.location.port : (window.location.protocol === 'http' ? 80 : 443);
     const ws = new WebSocket("ws://" + window.location.hostname + ":" + port + wsPath);
@@ -279,6 +298,7 @@ function connect() {
                 if (root !== null) {
                     document.body.removeChild(root);
                     root = document.createElement('div');
+                    root.dataset["app"] = "replica";
                     document.body.appendChild(root);
                 }
                 for (const element of update.dom) {
@@ -295,6 +315,7 @@ function connect() {
         }
     };
     ws.onclose = (event) => {
+        console.log(event);
         switch (event.code) {
             case CLOSE_CODE_NORMAL_CLOSURE:
                 // Server-side gracefully ended.
@@ -303,8 +324,19 @@ function connect() {
                 // Error occured on server-side.
                 alert("Internal server error, please reload the page: " + event.reason);
                 break;
+            case CLOSE_CODE_ABNORMAL_CLOSURE:
+                // Conection closed by TCP level. Worth trying re-connecting
+                // Note about access from mobile browser(android). 1~3mins after browser goes background,
+                // websocket connections gets disconnected by OS. When the browser becomes
+                // forground again, onclose is called with code 1006(abnormal closure).
+                console.log("try reconnect");
+                connect();
+                break;
             default:
-            // Other reasons. Some of them could be worth trying re-connecting.
+                // Other reasons. Some of them could be worth trying re-connecting.
+                console.log("ws.onClose code: " + event.code);
+            // let tn = document.createTextNode("ws.onClose code: " + event.code);
+            // document.body.appendChild(tn)
         }
     };
 }
