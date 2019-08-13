@@ -146,26 +146,24 @@ app AppConfig{..} rcfg cb = do
           case r of
             Left (SomeException e')         ->
               throwIO e'
-                `catch` do \(e :: ContextAttachingError)  -> sendIECloseCode conn e -- Rare.
-                `catch` do \(e :: ContextEventError)      -> sendIECloseCode conn e -- Rare. Problem occuered while event displatching/pasring.
+                `catch` do \(e :: ContextAttachingError)  -> internalErrorClosure conn e -- Rare.
+                `catch` do \(e :: ContextEventError)      -> internalErrorClosure conn e -- Rare. Problem occuered while event displatching/pasring.
                 `catch` do \(e :: WS.ConnectionException) -> -- Websocket(https://github.com/jaspervdj/websockets/blob/0f7289b2b5426985046f1733413bb00012a27537/src/Network/WebSockets/Types.hs#L141)
                              case e of
                                WS.CloseRequest _ _       -> pure ()   -- ???. Connection closedd intentonaly by client. Terminated Context?
                                WS.ConnectionClosed       -> pure ()   -- Most of the time. Connetion closed by TCP level unintentionaly.
-                               WS.ParseException _       -> sendIECloseCode conn e -- Rare.
-                               WS.UnicodeException _     -> sendIECloseCode conn e -- Rare.
-                `catch` do \(e :: SomeException)          -> sendIECloseCode conn e -- Rare. ??? don't know what happened
-            Right (Just (SomeException e))               -> sendIECloseCode conn e -- Maybe? Context ended by exception.
+                               WS.ParseException _       -> internalErrorClosure conn e -- Rare.
+                               WS.UnicodeException _     -> internalErrorClosure conn e -- Rare.
+                `catch` do \(e :: SomeException)          -> internalErrorClosure conn e -- Rare. ??? don't know what happened
+            Right (Just (SomeException e))               -> internalErrorClosure conn e -- Maybe? Context ended by exception.
             Right Nothing                                -> normalClosure conn -- Rare. Context ended gracefully
       where
-        sendIECloseCode conn e = do
+        internalErrorClosure conn e = do
           _ <- try @SomeException $ sendCloseCode conn closeCodeInternalError (T.pack $ show e)
           recieveCloseCode conn
           rlog rapp $ ReplicaWarnLog $ WarnWSClosedByInternalError (show e)
 
-        -- TODO: 何故か ブラウザ側は 1006、つまりブチ切り扱いにされる
-        -- 多分 conn で recieve しているところを非同期例外で止めてるから？
-        -- https://github.com/jaspervdj/websockets/issues/182
+        -- TODO: Currentlly doesn't work due to issue https://github.com/jaspervdj/websockets/issues/182
         -- recieveData を非同期例外で止めると、その後 connection が生きているのに sendClose しようとすると
         -- ConnectionClosed 例外が発生する。
         normalClosure conn = do
