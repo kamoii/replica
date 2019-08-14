@@ -350,7 +350,7 @@ preRender rapp@ReplicaApp{rappConfig} = do
         -- NOTE: _release は使わずに即コンテキストを動き始める。この実装方針で問題ないのか？
         -- Take care not to lost context, or else we'll leak threads.
         ctx <- startContext'
-        flip onException (killContext ctx) $ do
+        flip onException (terminateContext ctx) $ do
           ctxId <- genContextId
           now <- Ch.now
           dl <- atomically $ addOrphan rapp ctxId ctx now
@@ -413,7 +413,7 @@ manageReplicaApp rapp@ReplicaApp{..} =
         orphans <- atomically $ pickTargetOrphans rapp queue (max dl now)
         -- TODO: 確実に terminate したか確認したほうがいい？
         for_ orphans $ \(ctxId,ctx) -> async
-          $ killContext ctx <* rlog rapp (ReplicaInfoLog (InfoOrpanTerminated ctxId))
+          $ terminateContext ctx <* rlog rapp (ReplicaInfoLog (InfoOrpanTerminated ctxId))
 
     fromEither (Left a)  = a
     fromEither (Right a) = a
@@ -534,8 +534,8 @@ data Frame = Frame
 -- |
 -- | Do nothing if the context has already terminated.
 -- | Blocks until the context is actually terminated.
-killContext :: Context -> IO ()
-killContext Context{ctxThread} = cancel ctxThread
+terminateContext :: Context -> IO ()
+terminateContext Context{ctxThread} = cancel ctxThread
 
 -- | Check Context is terminated(gracefully or with exception)
 -- | Doesn't block.
