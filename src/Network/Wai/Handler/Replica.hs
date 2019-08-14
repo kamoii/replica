@@ -146,17 +146,19 @@ app AppConfig{..} rcfg cb = do
           case r of
             Left (SomeException e')         ->
               throwIO e'
-                `catch` do \(e :: ContextAttachingError)  -> internalErrorClosure conn e -- Rare.
-                `catch` do \(e :: ContextEventError)      -> internalErrorClosure conn e -- Rare. Problem occuered while event displatching/pasring.
-                `catch` do \(e :: WS.ConnectionException) -> -- Websocket(https://github.com/jaspervdj/websockets/blob/0f7289b2b5426985046f1733413bb00012a27537/src/Network/WebSockets/Types.hs#L141)
+                `catch` do \(e :: ContextAttachingError)      -> internalErrorClosure conn e -- Rare.
+                `catch` do \(e :: ContextEventError)          -> internalErrorClosure conn e -- Rare. Problem occuered while event displatching/pasring.
+                `catch` do \(e :: WS.ConnectionException)     -> -- Websocket(https://github.com/jaspervdj/websockets/blob/0f7289b2b5426985046f1733413bb00012a27537/src/Network/WebSockets/Types.hs#L141)
                              case e of
-                               WS.CloseRequest _ _       -> pure ()   -- ???. Connection closedd intentonaly by client. Terminated Context?
-                               WS.ConnectionClosed       -> pure ()   -- Most of the time. Connetion closed by TCP level unintentionaly.
-                               WS.ParseException _       -> internalErrorClosure conn e -- Rare.
-                               WS.UnicodeException _     -> internalErrorClosure conn e -- Rare.
-                `catch` do \(e :: SomeException)          -> internalErrorClosure conn e -- Rare. ??? don't know what happened
-            Right (Just (SomeException e))               -> internalErrorClosure conn e -- Maybe? Context ended by exception.
-            Right Nothing                                -> normalClosure conn -- Rare. Context ended gracefully
+                               WS.CloseRequest code _
+                                 | code == closeCodeGoingAway -> pure () -- When the page was closed(atleast with firefox/chrome). Termiante Context.
+                                 | otherwise                 -> pure () -- ??? Unexected Closure code
+                               WS.ConnectionClosed           -> pure () -- Most of the time. Connetion closed by TCP level unintentionaly. Leave contxt for re-connecting.
+                               WS.ParseException _           -> internalErrorClosure conn e -- Rare.
+                               WS.UnicodeException _         -> internalErrorClosure conn e -- Rare.
+                `catch` do \(e :: SomeException)              -> internalErrorClosure conn e -- Rare. ??? don't know what happened
+            Right (Just (SomeException e))                   -> internalErrorClosure conn e -- Maybe? Context ended by exception.
+            Right Nothing                                    -> normalClosure conn -- Rare. Context ended gracefully
       where
         internalErrorClosure conn e = do
           _ <- try @SomeException $ sendCloseCode conn closeCodeInternalError (T.pack $ show e)
@@ -164,8 +166,9 @@ app AppConfig{..} rcfg cb = do
           rlog rapp $ ReplicaWarnLog $ WarnWSClosedByInternalError (show e)
 
         -- TODO: Currentlly doesn't work due to issue https://github.com/jaspervdj/websockets/issues/182
-        -- recieveData を非同期例外で止めると、その後 connection が生きているのに sendClose しようとすると
-        -- ConnectionClosed 例外が発生する。
+        -- recieveData を非同期例外で止めると、その後 connection が生きているのに Stream は close されてしまい、
+        -- sendClose しようとすると ConnectionClosed 例外が発生する。
+        -- fixed: https://github.com/kamoii/websockets/tree/handle-async-exception
         normalClosure conn = do
           _ <- try @SomeException $ sendClose conn ("done" :: T.Text)
           recieveCloseCode conn
@@ -180,6 +183,7 @@ app AppConfig{..} rcfg cb = do
           pure ()
 
         closeCodeInternalError = 1011
+        closeCodeGoingAway     = 1001
         debugLog = rlog rapp . ReplicaDebugLog
 
 -- | ReplicaApp
