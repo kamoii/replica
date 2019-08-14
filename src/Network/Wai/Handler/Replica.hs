@@ -139,31 +139,47 @@ app AppConfig{..} rcfg cb = do
           conn <- acceptRequest pendingConn
           forkPingThread conn 30
           debugLog $ "WS started with contextId: " <> encodeContextId ctxId
-          r <- try
-            $ withContext rapp ctxId
-            $ \ctx -> attachContextToWebsocket conn ctx
-          debugLog $ "WS ended with: " <> T.pack (show r)
+          r <- try $ withContext rapp ctxId $ \ctx ->
+            do
+              v <- attachContextToWebsocket conn ctx
+              case v of
+                Just (SomeException e) -> internalErrorClosure conn e -- Context terminated by exception
+                Nothing                -> normalClosure conn          -- Context terminated gracefully
+            `catch` handleWSConnectionException conn ctx
+            `catch` handleContextEventError conn ctx
+            `catch` handleSomeException conn ctx
+
           case r of
-            Left (SomeException e')         ->
-              throwIO e'
-                `catch` do \(e :: ContextAttachingError)      -> internalErrorClosure conn e -- Rare.
-                `catch` do \(e :: ContextEventError)          -> internalErrorClosure conn e -- Rare. Problem occuered while event displatching/pasring.
-                `catch` do \(e :: WS.ConnectionException)     -> -- Websocket(https://github.com/jaspervdj/websockets/blob/0f7289b2b5426985046f1733413bb00012a27537/src/Network/WebSockets/Types.hs#L141)
-                             case e of
-                               WS.CloseRequest code _
-                                 | code == closeCodeGoingAway -> pure () -- When the page was closed(atleast with firefox/chrome). Termiante Context.
-                                 | otherwise                 -> pure () -- ??? Unexected Closure code
-                               WS.ConnectionClosed           -> pure () -- Most of the time. Connetion closed by TCP level unintentionaly. Leave contxt for re-connecting.
-                               WS.ParseException _           -> internalErrorClosure conn e -- Rare.
-                               WS.UnicodeException _         -> internalErrorClosure conn e -- Rare.
-                `catch` do \(e :: SomeException)              -> internalErrorClosure conn e -- Rare. ??? don't know what happened
-            Right (Just (SomeException e))                   -> internalErrorClosure conn e -- Maybe? Context ended by exception.
-            Right Nothing                                    -> normalClosure conn -- Rare. Context ended gracefully
+            Left (e :: ContextAttachingError) -> internalErrorClosure conn e -- Rare.
+            Right _ -> pure ()
       where
+        -- Websocket(https://github.com/jaspervdj/websockets/blob/0f7289b2b5426985046f1733413bb00012a27537/src/Network/WebSockets/Types.hs#L141)
+        -- CloseRequest(1006): When the page was closed(atleast with firefox/chrome). Termiante Context.
+        -- CloseRequest(???):  ??? Unexected Closure code
+        -- ConnectionClosed: Most of the time. Connetion closed by TCP level unintentionaly. Leave contxt for re-connecting.
+        handleWSConnectionException :: Connection -> Context -> WS.ConnectionException -> IO ()
+        handleWSConnectionException conn ctx e = case e of
+          WS.CloseRequest code _
+            | code == closeCodeGoingAway -> terminateContext ctx
+            | otherwise                 -> terminateContext ctx
+          WS.ConnectionClosed           -> pure ()
+          WS.ParseException _           -> terminateContext ctx *> internalErrorClosure conn e
+          WS.UnicodeException _         -> terminateContext ctx *> internalErrorClosure conn e
+
+        -- Rare. Problem occuered while event displatching/pasring.
+        handleContextEventError :: Connection -> Context -> ContextEventError -> IO ()
+        handleContextEventError conn ctx e =
+          terminateContext ctx *> internalErrorClosure conn e
+
+        -- Rare. ??? don't know what happened
+        handleSomeException :: Connection -> Context -> SomeException -> IO ()
+        handleSomeException conn ctx e =
+          terminateContext ctx *> internalErrorClosure conn e
+
         internalErrorClosure conn e = do
           _ <- try @SomeException $ sendCloseCode conn closeCodeInternalError (T.pack $ show e)
           recieveCloseCode conn
-          rlog rapp $ ReplicaWarnLog $ WarnWSClosedByInternalError (show e)
+          rlog rapp $ ReplicaErrorLog $ ErrorWSClosedByInternalError (show e)
 
         -- TODO: Currentlly doesn't work due to issue https://github.com/jaspervdj/websockets/issues/182
         -- recieveData を非同期例外で止めると、その後 connection が生きているのに Stream は close されてしまい、
@@ -220,7 +236,7 @@ data ContextManageState
 data ReplicaLog
   = ReplicaDebugLog T.Text
   | ReplicaInfoLog  ReplicaInfoLog
-  | ReplicaWarnLog  ReplicaWarnLog
+  | ReplicaErrorLog  ReplicaErrorLog
 
 data ReplicaInfoLog
   = InfoOrphanAdded ContextID Ch.Time
@@ -228,13 +244,13 @@ data ReplicaInfoLog
   | InfoBackToOrphan ContextID
   | InfoOrpanTerminated ContextID
 
-data ReplicaWarnLog
-  = WarnWSClosedByInternalError String
+data ReplicaErrorLog
+  = ErrorWSClosedByInternalError String
 
 rlogSeverity :: ReplicaLog -> Co.Severity
-rlogSeverity (ReplicaInfoLog _) = Co.Info
+rlogSeverity (ReplicaInfoLog _)  = Co.Info
 rlogSeverity (ReplicaDebugLog _) = Co.Debug
-rlogSeverity (ReplicaWarnLog _) = Co.Warning
+rlogSeverity (ReplicaErrorLog _) = Co.Error
 
 rlogToText :: ReplicaLog -> T.Text
 rlogToText (ReplicaDebugLog t) = t
@@ -243,8 +259,8 @@ rlogToText (ReplicaInfoLog l)  = case l of
   InfoOrpanAttached ctxId         -> "Orphan attaced: " <> encodeContextId ctxId
   InfoBackToOrphan ctxId          -> "Back to orphan: " <> encodeContextId ctxId
   InfoOrpanTerminated ctxId       -> "Orphan terminated: " <> encodeContextId ctxId
-rlogToText (ReplicaWarnLog l)  = case l of
-  WarnWSClosedByInternalError mes -> "Closed websocket connecion by internal error: " <> T.pack mes
+rlogToText (ReplicaErrorLog l)  = case l of
+  ErrorWSClosedByInternalError mes -> "Closed websocket connecion by internal error: " <> T.pack mes
 
 rlog :: ReplicaApp -> ReplicaLog -> IO ()
 rlog ReplicaApp{ rappConfig = ReplicaAppConfig{rcfgLogAction} } message =
