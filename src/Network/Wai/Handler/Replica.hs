@@ -157,13 +157,14 @@ app AppConfig{..} rcfg cb = do
             `catch` handleContextEventError conn ctx
             `catch` handleSomeException conn ctx
 
+          -- サーバ側を再起動した場合、基本みんな再接続を試そうとして
+          -- ContextDoesntExist エラーが発生する。ブラウザ側では再ロー
+          -- ドを勧めるべし。
           case r of
             Left (e :: ContextAttachingError) ->
-              -- サーバ側を再起動した場合、基本みんな再接続を試そうと
-              -- してこのエラーが発生する。ブラウザ側では再ロードを勧
-              -- めるべし。
-              -- TODO: Internal Error とは違うな... セッションが切れました？のほうが近いかも。
-              internalErrorClosure conn e
+              case e of
+                ContextDoesntExist     -> contextNotFoundClosure conn
+                ContextAlreadyAttached -> internalErrorClosure conn e
             Right _ ->
               pure ()
       where
@@ -190,8 +191,10 @@ app AppConfig{..} rcfg cb = do
         handleSomeException conn ctx e =
           terminateContext ctx *> internalErrorClosure conn e
 
+        -- We probably shouldn't show what caused the internal
+        -- error. It'll just confuse users. For debug purpose use log.
         internalErrorClosure conn e = do
-          _ <- try @SomeException $ sendCloseCode conn closeCodeInternalError (T.pack $ show e)
+          _ <- trySome $ sendCloseCode conn closeCodeInternalError ("" :: T.Text)
           recieveCloseCode conn
           rlog rapp $ ReplicaErrorLog $ ErrorWSClosedByInternalError (show e)
 
@@ -200,20 +203,34 @@ app AppConfig{..} rcfg cb = do
         -- sendClose しようとすると ConnectionClosed 例外が発生する。
         -- fixed: https://github.com/kamoii/websockets/tree/handle-async-exception
         normalClosure conn = do
-          _ <- try @SomeException $ sendClose conn ("done" :: T.Text)
+          _ <- trySome $ sendClose conn ("done" :: T.Text)
           recieveCloseCode conn
-          rlog rapp $ ReplicaDebugLog $ "Closing gracefully"
+          rlog rapp $ ReplicaDebugLog $ "Closure: Gracefully"
+
+        -- IE とは区別して扱いため。
+        --
+        --  * Connection closed and before re-connecting it was terminated
+        --  * Sever restarted
+        --  * Rare case: ContextID which has valid form but
+        --
+        contextNotFoundClosure conn = do
+          _ <- trySome $ sendCloseCode conn closeCodeContextNotFound ("" :: T.Text)
+          recieveCloseCode conn
+          rlog rapp $ ReplicaDebugLog $ "Closure: Context didn't exist"
 
         -- After sending client the close code, we need to recieve
         -- close packet from client. If we don't do this and
         -- immideatly closed the tcp connection, it'll be an abnormal
         -- closure from client pov.
         recieveCloseCode conn = do
-          _ <- try @SomeException $ forever $ receiveDataMessage conn
+          _ <- trySome $ forever $ receiveDataMessage conn
           pure ()
 
-        closeCodeInternalError = 1011
-        closeCodeGoingAway     = 1001
+        trySome = try @SomeException
+
+        closeCodeInternalError   = 1011
+        closeCodeGoingAway       = 1001
+        closeCodeContextNotFound = 4000 -- app original code
 
 -- | ReplicaApp
 -- |

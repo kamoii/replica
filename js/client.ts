@@ -389,9 +389,10 @@ function buildDOM(ws: WebSocket, dom: DOM, index: number | null, parent: Element
 // Reference:
 // https://developer.mozilla.org/en-US/docs/Web/API/CloseEvent
 // https://tools.ietf.org/html/rfc6455#section-7.4
-const CLOSE_CODE_NORMAL_CLOSURE   = 1000
-const CLOSE_CODE_ABNORMAL_CLOSURE = 1006
-const CLOSE_CODE_INTERNAL_ERROR   = 1011
+const CLOSE_CODE_NORMAL_CLOSURE    = 1000
+const CLOSE_CODE_ABNORMAL_CLOSURE  = 1006
+const CLOSE_CODE_INTERNAL_ERROR    = 1011
+const CLOSE_CODE_CONTEXT_NOT_FOUND = 4000
 
 // Path to connect. Includes information to attach to proper context.
 const WS_PATH_DATA_ATTR = 'replicaWsPath'
@@ -460,9 +461,14 @@ function connect() {
       case CLOSE_CODE_NORMAL_CLOSURE:
         // Server-side gracefully ended.
         break;
+      case CLOSE_CODE_CONTEXT_NOT_FOUND:
+        // When server restarted/ or re-connecting was too slow
+        // Probably "session" is a more familier name to user.
+        alert("Session terminated. Please reload the page");
+        break;
       case CLOSE_CODE_INTERNAL_ERROR:
         // Error occured on server-side.
-        alert("Internal server error, please reload the page: " + event.reason);
+        alert("Error occured. Please reload the page");
         break;
       case CLOSE_CODE_ABNORMAL_CLOSURE:
         // Conection closed by TCP level. Worth trying re-connecting
