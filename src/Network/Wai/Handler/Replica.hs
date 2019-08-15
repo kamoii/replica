@@ -107,11 +107,11 @@ app AppConfig{..} rcfg cb = do
   let bapp = acfgMiddleware $ backupApp rapp
   withWorker (manageReplicaApp rapp) $ cb (websocketsOr acfgWSConnectionOptions wapp bapp)
   where
-    encodeToWsPath :: ContextID -> T.Text
-    encodeToWsPath ctxId = "/" <> encodeContextId ctxId
+    encodeToWsPath :: SessionID -> T.Text
+    encodeToWsPath sesId = "/" <> encodeSessionId sesId
 
-    decodeFromWsPath :: T.Text -> Maybe ContextID
-    decodeFromWsPath wspath = decodeContextId (T.drop 1 wspath)
+    decodeFromWsPath :: T.Text -> Maybe SessionID
+    decodeFromWsPath wspath = decodeSessionId (T.drop 1 wspath)
 
     backupApp :: ReplicaApp -> Application
     backupApp rapp req respond
@@ -120,8 +120,8 @@ app AppConfig{..} rcfg cb = do
           case v of
             Nothing -> do
               respond $ responseLBS status200 [] ""
-            Just (ctxId, body) -> do
-              let html = V.ssrHtml acfgTitle (encodeToWsPath ctxId) acfgHeader body
+            Just (sesId, body) -> do
+              let html = V.ssrHtml acfgTitle (encodeToWsPath sesId) acfgHeader body
               respond $ responseLBS status200 [("content-type", "text/html")] (renderHTML html)
       | otherwise = do
           -- 406 Not Accetable
@@ -144,52 +144,52 @@ app AppConfig{..} rcfg cb = do
         Nothing -> do
           -- TODO: what happens to the client side?
           rejectRequest pendingConn "invalid ws path"
-        Just ctxId -> do
+        Just sesId -> do
           conn <- acceptRequest pendingConn
           forkPingThread conn 30
-          r <- try $ withContext rapp ctxId $ \ctx ->
+          r <- try $ withSession rapp sesId $ \ses ->
             do
-              v <- attachContextToWebsocket conn ctx
+              v <- attachSessionToWebsocket conn ses
               case v of
-                Just (SomeException e) -> internalErrorClosure conn e -- Context terminated by exception
-                Nothing                -> normalClosure conn          -- Context terminated gracefully
-            `catch` handleWSConnectionException conn ctx
-            `catch` handleContextEventError conn ctx
-            `catch` handleSomeException conn ctx
+                Just (SomeException e) -> internalErrorClosure conn e -- Session terminated by exception
+                Nothing                -> normalClosure conn          -- Session terminated gracefully
+            `catch` handleWSConnectionException conn ses
+            `catch` handleSessionEventError conn ses
+            `catch` handleSomeException conn ses
 
           -- サーバ側を再起動した場合、基本みんな再接続を試そうとして
-          -- ContextDoesntExist エラーが発生する。ブラウザ側では再ロー
+          -- SessionDoesntExist エラーが発生する。ブラウザ側では再ロー
           -- ドを勧めるべし。
           case r of
-            Left (e :: ContextAttachingError) ->
+            Left (e :: SessionAttachingError) ->
               case e of
-                ContextDoesntExist     -> contextNotFoundClosure conn
-                ContextAlreadyAttached -> internalErrorClosure conn e
+                SessionDoesntExist     -> sessionNotFoundClosure conn
+                SessionAlreadyAttached -> internalErrorClosure conn e
             Right _ ->
               pure ()
       where
         -- Websocket(https://github.com/jaspervdj/websockets/blob/0f7289b2b5426985046f1733413bb00012a27537/src/Network/WebSockets/Types.hs#L141)
-        -- CloseRequest(1006): When the page was closed(atleast with firefox/chrome). Termiante Context.
+        -- CloseRequest(1006): When the page was closed(atleast with firefox/chrome). Termiante Session.
         -- CloseRequest(???):  ??? Unexected Closure code
         -- ConnectionClosed: Most of the time. Connetion closed by TCP level unintentionaly. Leave contxt for re-connecting.
-        handleWSConnectionException :: Connection -> Context -> WS.ConnectionException -> IO ()
-        handleWSConnectionException conn ctx e = case e of
+        handleWSConnectionException :: Connection -> Session -> WS.ConnectionException -> IO ()
+        handleWSConnectionException conn ses e = case e of
           WS.CloseRequest code _
-            | code == closeCodeGoingAway -> terminateContext ctx
-            | otherwise                 -> terminateContext ctx
+            | code == closeCodeGoingAway -> terminateSession ses
+            | otherwise                 -> terminateSession ses
           WS.ConnectionClosed           -> pure ()
-          WS.ParseException _           -> terminateContext ctx *> internalErrorClosure conn e
-          WS.UnicodeException _         -> terminateContext ctx *> internalErrorClosure conn e
+          WS.ParseException _           -> terminateSession ses *> internalErrorClosure conn e
+          WS.UnicodeException _         -> terminateSession ses *> internalErrorClosure conn e
 
         -- Rare. Problem occuered while event displatching/pasring.
-        handleContextEventError :: Connection -> Context -> ContextEventError -> IO ()
-        handleContextEventError conn ctx e =
-          terminateContext ctx *> internalErrorClosure conn e
+        handleSessionEventError :: Connection -> Session -> SessionEventError -> IO ()
+        handleSessionEventError conn ses e =
+          terminateSession ses *> internalErrorClosure conn e
 
         -- Rare. ??? don't know what happened
-        handleSomeException :: Connection -> Context -> SomeException -> IO ()
-        handleSomeException conn ctx e =
-          terminateContext ctx *> internalErrorClosure conn e
+        handleSomeException :: Connection -> Session -> SomeException -> IO ()
+        handleSomeException conn ses e =
+          terminateSession ses *> internalErrorClosure conn e
 
         -- We probably shouldn't show what caused the internal
         -- error. It'll just confuse users. For debug purpose use log.
@@ -211,12 +211,12 @@ app AppConfig{..} rcfg cb = do
         --
         --  * Connection closed and before re-connecting it was terminated
         --  * Sever restarted
-        --  * Rare case: ContextID which has valid form but
+        --  * Rare case: SessionID which has valid form but
         --
-        contextNotFoundClosure conn = do
-          _ <- trySome $ sendCloseCode conn closeCodeContextNotFound ("" :: T.Text)
+        sessionNotFoundClosure conn = do
+          _ <- trySome $ sendCloseCode conn closeCodeSessionNotFound ("" :: T.Text)
           recieveCloseCode conn
-          rlog rapp $ ReplicaDebugLog $ "Closure: Context didn't exist"
+          rlog rapp $ ReplicaDebugLog $ "Closure: Session didn't exist"
 
         -- After sending client the close code, we need to recieve
         -- close packet from client. If we don't do this and
@@ -230,13 +230,13 @@ app AppConfig{..} rcfg cb = do
 
         closeCodeInternalError   = 1011
         closeCodeGoingAway       = 1001
-        closeCodeContextNotFound = 4000 -- app original code
+        closeCodeSessionNotFound = 4000 -- app original code
 
 -- | ReplicaApp
 -- |
--- | Context の状態(running, termianted) と直交して Context へのアタッチ状態を持つ
+-- | Session の状態(running, termianted) と直交して Session へのアタッチ状態を持つ
 -- |
--- |  1. orphan       アタッチされていない。Context は running/terminated 両方のケースがありうる
+-- |  1. orphan       アタッチされていない。Session は running/terminated 両方のケースがありうる
 -- |  2. attached     クライストにアタッチされている。基本running中だが、最初から terminated なものがアタッチされる可能性はある。
 -- |
 -- | ※第三の状態、suspended (prerender はしたが、そこで止めている状態)も考えられるが、
@@ -253,12 +253,12 @@ app AppConfig{..} rcfg cb = do
 
 data ReplicaApp = ReplicaApp
   { rappConfig   :: ReplicaAppConfig
-  , rappCtxMap   :: TVar (M.Map ContextID (Context, TVar ContextManageState))
-  , rappOrphans0 :: TVar (PSQ.OrdPSQ ContextID Ch.Time Context)   -- ^ 初期接続待ち
-  , rappOrphans  :: TVar (PSQ.OrdPSQ ContextID Ch.Time Context)   -- ^ 再接続待ち
+  , rappSesMap   :: TVar (M.Map SessionID (Session, TVar SessionManageState))
+  , rappOrphans0 :: TVar (PSQ.OrdPSQ SessionID Ch.Time Session)   -- ^ 初期接続待ち
+  , rappOrphans  :: TVar (PSQ.OrdPSQ SessionID Ch.Time Session)   -- ^ 再接続待ち
   }
 
-data ContextManageState
+data SessionManageState
   = CMSOrphan
   | CMSAttached
   deriving (Eq, Show)
@@ -269,10 +269,10 @@ data ReplicaLog
   | ReplicaErrorLog  ReplicaErrorLog
 
 data ReplicaInfoLog
-  = InfoOrphanAdded ContextID Ch.Time
-  | InfoOrpanAttached ContextID
-  | InfoBackToOrphan ContextID
-  | InfoOrpanTerminated ContextID
+  = InfoOrphanAdded SessionID Ch.Time
+  | InfoOrpanAttached SessionID
+  | InfoBackToOrphan SessionID
+  | InfoOrpanTerminated SessionID
 
 data ReplicaErrorLog
   = ErrorWSClosedByInternalError String
@@ -285,10 +285,10 @@ rlogSeverity (ReplicaErrorLog _) = Co.Error
 rlogToText :: ReplicaLog -> T.Text
 rlogToText (ReplicaDebugLog t) = t
 rlogToText (ReplicaInfoLog l)  = case l of
-  InfoOrphanAdded ctxId dl        -> "New orpahan addded: " <> encodeContextId ctxId <> ", deadline: " <> encodeTime dl
-  InfoOrpanAttached ctxId         -> "Orphan attaced: " <> encodeContextId ctxId
-  InfoBackToOrphan ctxId          -> "Back to orphan: " <> encodeContextId ctxId
-  InfoOrpanTerminated ctxId       -> "Orphan terminated: " <> encodeContextId ctxId
+  InfoOrphanAdded sesId dl        -> "New orpahan addded: " <> encodeSessionId sesId <> ", deadline: " <> encodeTime dl
+  InfoOrpanAttached sesId         -> "Orphan attaced: " <> encodeSessionId sesId
+  InfoBackToOrphan sesId          -> "Back to orphan: " <> encodeSessionId sesId
+  InfoOrpanTerminated sesId       -> "Orphan terminated: " <> encodeSessionId sesId
 rlogToText (ReplicaErrorLog l)  = case l of
   ErrorWSClosedByInternalError mes -> "Closed websocket connecion by internal error: " <> T.pack mes
 
@@ -311,37 +311,37 @@ encodeTime time =
 -- | STM primitives(privates)
 
 -- returns deadline
-addOrphan :: ReplicaApp -> ContextID -> Context -> Ch.Time -> STM Ch.Time
-addOrphan ReplicaApp{..} ctxId ctx now = do
+addOrphan :: ReplicaApp -> SessionID -> Session -> Ch.Time -> STM Ch.Time
+addOrphan ReplicaApp{..} sesId ses now = do
   let deadline = rcfgWSInitialConnectLimit rappConfig `add` now
   stateVar <- newTVar CMSOrphan
-  modifyTVar' rappCtxMap   $ M.insert ctxId (ctx, stateVar)
-  modifyTVar' rappOrphans0 $ PSQ.insert ctxId deadline ctx
+  modifyTVar' rappSesMap   $ M.insert sesId (ses, stateVar)
+  modifyTVar' rappOrphans0 $ PSQ.insert sesId deadline ses
   pure deadline
 
-acquireContext :: ReplicaApp -> ContextID -> STM (Context, TVar ContextManageState)
-acquireContext ReplicaApp{..} ctxId = do
-  ctxMap          <- readTVar rappCtxMap
-  (ctx, stateVar) <- M.lookup ctxId ctxMap & maybe (throwSTM ContextDoesntExist) pure
+acquireSession :: ReplicaApp -> SessionID -> STM (Session, TVar SessionManageState)
+acquireSession ReplicaApp{..} sesId = do
+  sesMap          <- readTVar rappSesMap
+  (ses, stateVar) <- M.lookup sesId sesMap & maybe (throwSTM SessionDoesntExist) pure
   state           <- readTVar stateVar
   case state of
     CMSAttached ->
-      throwSTM ContextAlreadyAttached
+      throwSTM SessionAlreadyAttached
     CMSOrphan   -> do
       writeTVar stateVar CMSAttached
-      modifyTVar' rappOrphans0 $ PSQ.delete ctxId
-      modifyTVar' rappOrphans  $ PSQ.delete ctxId
-      pure (ctx, stateVar)
+      modifyTVar' rappOrphans0 $ PSQ.delete sesId
+      modifyTVar' rappOrphans  $ PSQ.delete sesId
+      pure (ses, stateVar)
 
-releaseContext :: ReplicaApp ->  ContextID -> (Context, TVar ContextManageState) -> Ch.Time -> STM ()
-releaseContext ReplicaApp{..} ctxId (ctx, stateVar) now = do
+releaseSession :: ReplicaApp ->  SessionID -> (Session, TVar SessionManageState) -> Ch.Time -> STM ()
+releaseSession ReplicaApp{..} sesId (ses, stateVar) now = do
   let deadline = rcfgWSInitialConnectLimit rappConfig `add` now
-  b <- isTerminatedSTM ctx
+  b <- isTerminatedSTM ses
   if b
-    then modifyTVar' rappCtxMap $ M.delete ctxId
+    then modifyTVar' rappSesMap $ M.delete sesId
     else do
       writeTVar stateVar CMSOrphan
-      modifyTVar' rappOrphans $ PSQ.insert ctxId deadline ctx
+      modifyTVar' rappOrphans $ PSQ.insert sesId deadline ses
 
 -- Get the most near deadline. Doesn't pop the queue.
 -- If the queue is empty, block till first item arrives.
@@ -352,14 +352,14 @@ firstDeadline orphansVar = do
     Nothing -> retry
     Just (_, t, _) -> pure t
 
--- Targets to terminate. Targets are removed from rappCtxMap
+-- Targets to terminate. Targets are removed from rappSesMap
 -- 現在より 0.1s 以内のものはまとめて停止対象とする(
 pickTargetOrphans
   :: ReplicaApp
-  -> TVar (PSQ.OrdPSQ ContextID Ch.Time Context)
+  -> TVar (PSQ.OrdPSQ SessionID Ch.Time Session)
   -> Ch.Time
-  -> STM [(ContextID, Context)]
-pickTargetOrphans ReplicaApp{rappCtxMap} orphansVar now = do
+  -> STM [(SessionID, Session)]
+pickTargetOrphans ReplicaApp{rappSesMap} orphansVar now = do
   let dl = (100 `scale` millisecond) `add` now
   orphans <- readTVar orphansVar
   (orphans', targets) <- go dl orphans []
@@ -368,10 +368,10 @@ pickTargetOrphans ReplicaApp{rappCtxMap} orphansVar now = do
   where
     go deadline que acc = do
       case PSQ.findMin que of
-        Just (ctxId, t, ctx)
+        Just (sesId, t, ses)
           | t <= deadline -> do
-              modifyTVar' rappCtxMap $ M.delete ctxId
-              go deadline (PSQ.deleteMin que) ((ctxId,ctx) : acc)
+              modifyTVar' rappSesMap $ M.delete sesId
+              go deadline (PSQ.deleteMin que) ((sesId,ses) : acc)
         _ -> pure (que, acc)
 
     millisecond = Ch.Timespan 1000000
@@ -386,39 +386,39 @@ initializeReplicaApp rcfg =
 -- | Server-side rendering
 -- | For rare case, the application could end without generating.
 -- TODO: use appconfig inside ReplicaApp
-preRender :: ReplicaApp -> IO (Maybe (ContextID, V.HTML))
+preRender :: ReplicaApp -> IO (Maybe (SessionID, V.HTML))
 preRender rapp@ReplicaApp{rappConfig} = do
   mask $ \restore -> do
     s <- restore $ firstStep' rappConfig
     case s of
       Nothing -> pure Nothing
-      Just (initialVdom, startContext', _release) -> do
+      Just (initialVdom, startSession', _release) -> do
         -- NOTE: _release は使わずに即コンテキストを動き始める。この実装方針で問題ないのか？
-        -- Take care not to lost context, or else we'll leak threads.
-        ctx <- startContext'
-        flip onException (terminateContext ctx) $ do
-          ctxId <- genContextId
+        -- Take care not to lost session, or else we'll leak threads.
+        ses <- startSession'
+        flip onException (terminateSession ses) $ do
+          sesId <- genSessionId
           now <- Ch.now
-          dl <- atomically $ addOrphan rapp ctxId ctx now
-          rlog rapp $ ReplicaInfoLog $ InfoOrphanAdded ctxId dl
-          pure $ Just (ctxId, initialVdom)
+          dl <- atomically $ addOrphan rapp sesId ses now
+          rlog rapp $ ReplicaInfoLog $ InfoOrphanAdded sesId dl
+          pure $ Just (sesId, initialVdom)
   where
     -- let ReplicaAppConfig{..} = rappConfig だとエラーが出るので？
     firstStep' ReplicaAppConfig{..} =
       firstStep rcfgResourceAquire rcfgResourceRelease rcfgInitial rcfgStep
 
-data ContextAttachingError
-  = ContextDoesntExist
-  | ContextAlreadyAttached
+data SessionAttachingError
+  = SessionDoesntExist
+  | SessionAlreadyAttached
   deriving (Eq, Show)
 
-instance Exception ContextAttachingError
+instance Exception SessionAttachingError
 
 -- | 取り出して
 -- |
 -- | 例外を投げるのは以下のケース
 -- |
--- |  1) ContextID に対応する ctx が存在しない
+-- |  1) SessionID に対応する ses が存在しない
 -- |  2) 存在するが、既に attached 状態である
 -- |  3) コンテキストを渡したコールバックが例外を投げた場合
 -- |
@@ -429,22 +429,22 @@ instance Exception ContextAttachingError
 -- |
 -- | 例え orpahn 中にコンテキストが終了してしまったとしても callback は呼ばれる。
 -- |
-withContext :: ReplicaApp -> ContextID -> (Context -> IO a) -> IO a
-withContext rapp ctxId cb = bracket req rel (cb . fst)
+withSession :: ReplicaApp -> SessionID -> (Session -> IO a) -> IO a
+withSession rapp sesId cb = bracket req rel (cb . fst)
   where
     req = do
-      atomically (acquireContext rapp ctxId)
-        <* rlog rapp (ReplicaInfoLog (InfoOrpanAttached ctxId))
+      atomically (acquireSession rapp sesId)
+        <* rlog rapp (ReplicaInfoLog (InfoOrpanAttached sesId))
     rel r = do
       now <- Ch.now
-      atomically (releaseContext rapp ctxId r now)
-        <* rlog rapp (ReplicaInfoLog (InfoBackToOrphan ctxId))
+      atomically (releaseSession rapp sesId r now)
+        <* rlog rapp (ReplicaInfoLog (InfoBackToOrphan sesId))
 
 manageReplicaApp :: ReplicaApp -> IO Void
 manageReplicaApp rapp@ReplicaApp{..} =
   fromEither <$> race (orphanTerminator rappOrphans0) (orphanTerminator rappOrphans)
   where
-    orphanTerminator :: TVar (PSQ.OrdPSQ ContextID Ch.Time Context) -> IO Void
+    orphanTerminator :: TVar (PSQ.OrdPSQ SessionID Ch.Time Session) -> IO Void
     orphanTerminator queue = forever $ do
       dl <- atomically $ firstDeadline queue
       now <- Ch.now
@@ -458,62 +458,62 @@ manageReplicaApp rapp@ReplicaApp{..} =
         -- ゼロ件の可能性もあるので注意(直近の deadline のものが attach された場合)
         orphans <- atomically $ pickTargetOrphans rapp queue (max dl now)
         -- TODO: 確実に terminate したか確認したほうがいい？
-        for_ orphans $ \(ctxId,ctx) -> async
-          $ terminateContext ctx <* rlog rapp (ReplicaInfoLog (InfoOrpanTerminated ctxId))
+        for_ orphans $ \(sesId,ses) -> async
+          $ terminateSession ses <* rlog rapp (ReplicaInfoLog (InfoOrpanTerminated sesId))
 
     fromEither (Left a)  = a
     fromEither (Right a) = a
 
 
-newtype ContextID = ContextID B.ByteString
+newtype SessionID = SessionID B.ByteString
   deriving (Eq, Ord)
 
-contextIdByteLength :: Int
-contextIdByteLength = 16
+sessionIdByteLength :: Int
+sessionIdByteLength = 16
 
-genContextId :: MonadRandom m => m ContextID
-genContextId = ContextID <$> getRandomBytes contextIdByteLength
+genSessionId :: MonadRandom m => m SessionID
+genSessionId = SessionID <$> getRandomBytes sessionIdByteLength
 
--- | ContextID's text representation, safe to use as url path segment
-encodeContextId :: ContextID -> T.Text
-encodeContextId (ContextID bs) = encodeHex bs
+-- | SessionID's text representation, safe to use as url path segment
+encodeSessionId :: SessionID -> T.Text
+encodeSessionId (SessionID bs) = encodeHex bs
 
-decodeContextId :: T.Text -> Maybe ContextID
-decodeContextId t = do
+decodeSessionId :: T.Text -> Maybe SessionID
+decodeSessionId t = do
   bs <- decodeHex t
-  guard $ B.length bs == contextIdByteLength
-  pure $ ContextID bs
+  guard $ B.length bs == sessionIdByteLength
+  pure $ SessionID bs
 
--- These exceptions are not to ment recoverable. Should stop the context.
+-- These exceptions are not to ment recoverable. Should stop the session.
 -- TODO: Make it more rich to make debug easier?
--- TODO: Split to ContextEventError and ProtocolError
-data ContextEventError
+-- TODO: Split to SessionEventError and ProtocolError
+data SessionEventError
   = IllformedData
   | InvalidEvent
   deriving Show
 
-instance Exception ContextEventError
+instance Exception SessionEventError
 
--- | Attacehes context to webcoket connection
+-- | Attacehes session to webcoket connection
 --
 -- This function will block until:
 --
 --   * Connection/Protocol-wise exception thrown, or
---   * Context ends gracefully, returning `Nothing`, or
---   * Context ends by exception, returning `Just SomeException`
+--   * Session ends gracefully, returning `Nothing`, or
+--   * Session ends by exception, returning `Just SomeException`
 --
 -- Some notes:
 --
---   * Assumes this context is not attached to any other connection. (※1)
---   * Connection/Protocol-wise exception(e.g. connection closed by client) will not stop the context.
---   * Atleast one frame will always be sent immiedatly. Even in a case where context is already
+--   * Assumes this session is not attached to any other connection. (※1)
+--   * Connection/Protocol-wise exception(e.g. connection closed by client) will not stop the session.
+--   * Atleast one frame will always be sent immiedatly. Even in a case where session is already
 --     over/stopped by exception. In those case, it sends one frame and immiedeatly returns.
 --   * First frame will be sent as `ReplaceDOM`, following frame will be sent as `UpdateDOM`
 --   * In some rare case, when stepLoop is looping too fast, few frame might be get skipped,
 --     but its not much a problems since those frame would have been shown only for a moment. (※2)
 --
 -- ※1
--- Actually, there is no problem attaching more than one connection to a single context.
+-- Actually, there is no problem attaching more than one connection to a single session.
 -- We can do crazy things like 'read-only' attach and make a admin page where you can
 -- peek users realtime page.
 --
@@ -522,18 +522,18 @@ instance Exception ContextEventError
 -- We can actually mitigate this by preserving recent frames, not just the latest one.
 -- Or use `chan` to distribute frames.
 --
-attachContextToWebsocket :: Connection -> Context -> IO (Maybe SomeException)
-attachContextToWebsocket conn ctx = withWorker eventLoop frameLoop
+attachSessionToWebsocket :: Connection -> Session -> IO (Maybe SomeException)
+attachSessionToWebsocket conn ses = withWorker eventLoop frameLoop
   where
     frameLoop :: IO (Maybe SomeException)
     frameLoop = do
-      v@(f, _) <- atomically $ readTVar (ctxFrame ctx)
+      v@(f, _) <- atomically $ readTVar (sesFrame ses)
       sendTextData conn $ A.encode $ ReplaceDOM (frameVdom f)
       frameLoop' v
 
     frameLoop' :: (Frame, TMVar (Maybe Event)) -> IO (Maybe SomeException)
     frameLoop' (prevFrame, prevStepedBy) = do
-      e <- atomically $  Left <$> getNewerFrame <|> Right <$> waitCatchSTM (ctxThread ctx)
+      e <- atomically $  Left <$> getNewerFrame <|> Right <$> waitCatchSTM (sesThread ses)
       case e of
         Left (v@(frame,_), stepedBy) -> do
           diff <- evaluate $ V.diff (frameVdom prevFrame) (frameVdom frame)
@@ -544,18 +544,18 @@ attachContextToWebsocket conn ctx = withWorker eventLoop frameLoop
           pure $ either Just (const Nothing) result
       where
         getNewerFrame = do
-          v@(f, _) <- readTVar (ctxFrame ctx)
+          v@(f, _) <- readTVar (sesFrame ses)
           check $ frameNumber f > frameNumber prevFrame
-          s <- readTMVar prevStepedBy  -- This should not block if we implement propertly. See `Context`'s documenation.
+          s <- readTMVar prevStepedBy  -- This should not block if we implement propertly. See `Session`'s documenation.
           pure (v, s)
 
     eventLoop :: IO Void
     eventLoop = forever $ do
       ev' <- A.decode <$> receiveData conn
       ev  <- maybe (throwIO IllformedData) pure ev'
-      atomically $ writeTQueue (ctxEventQueue ctx) ev
+      atomically $ writeTQueue (sesEventQueue ses) ev
 
--- | Context
+-- | Session
 --
 --  NOTES:
 --
@@ -563,11 +563,11 @@ attachContextToWebsocket conn ctx = withWorker eventLoop frameLoop
 --    Only exception to this is when exception occurs, last setted frame's `stepedBy` could be empty forever.
 --
 -- TODO: TMVar in a TVar. Is that a good idea?
--- TODO: Is name `Context` appropiate?
-data Context = Context
-  { ctxFrame      :: TVar (Frame, TMVar (Maybe Event))
-  , ctxEventQueue :: TQueue Event   -- TBqueue might be better
-  , ctxThread     :: Async ()
+-- TODO: Is name `Session` appropiate?
+data Session = Session
+  { sesFrame      :: TVar (Frame, TMVar (Maybe Event))
+  , sesEventQueue :: TQueue Event   -- TBqueue might be better
+  , sesThread     :: Async ()
   }
 
 data Frame = Frame
@@ -576,17 +576,17 @@ data Frame = Frame
   , frameFire :: Event -> Maybe (IO ())
   }
 
--- | Kill Context
+-- | Kill Session
 -- |
--- | Do nothing if the context has already terminated.
--- | Blocks until the context is actually terminated.
-terminateContext :: Context -> IO ()
-terminateContext Context{ctxThread} = cancel ctxThread
+-- | Do nothing if the session has already terminated.
+-- | Blocks until the session is actually terminated.
+terminateSession :: Session -> IO ()
+terminateSession Session{sesThread} = cancel sesThread
 
--- | Check Context is terminated(gracefully or with exception)
+-- | Check Session is terminated(gracefully or with exception)
 -- | Doesn't block.
-isTerminatedSTM :: Context -> STM Bool
-isTerminatedSTM Context{ctxThread} = isJust <$> pollSTM ctxThread
+isTerminatedSTM :: Session -> STM Bool
+isTerminatedSTM Session{sesThread} = isJust <$> pollSTM sesThread
 
 -- | Execute the first step.
 --
@@ -599,8 +599,8 @@ isTerminatedSTM Context{ctxThread} = isJust <$> pollSTM ctxThread
 --  * リソースが獲得されたなら、firstSteps関数が
 --
 -- もし `firstStep`関数が無事完了し、Just を返したならば、返り値の IO
--- Context, もしくは IO () のどちらかが一方だけが必ず呼ばれる必要があ
--- る。後者は、Context を開始したくない場合に利用する(例えば一定時間立っ
+-- Session, もしくは IO () のどちらかが一方だけが必ず呼ばれる必要があ
+-- る。後者は、Session を開始したくない場合に利用する(例えば一定時間立っ
 -- ても browser が繋げに来なかった場合、など)。
 --
 -- リソース獲得及び解放ハンドラは mask された状態で実行される
@@ -613,7 +613,7 @@ firstStep
   -> (res -> IO ())
   -> (res -> st)
   -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
-  -> IO (Maybe (V.HTML, IO Context, IO ()))
+  -> IO (Maybe (V.HTML, IO Session, IO ()))
 firstStep acquireRes releaseRes_ initial step = mask $ \restore -> do
   v <- acquireRes
   i <- newIORef False
@@ -631,16 +631,16 @@ firstStep acquireRes releaseRes_ initial step = mask $ \restore -> do
         vdom <- evaluate _vdom
         pure $ Just
           ( vdom
-          , startContext release step (vdom, st, fire)
+          , startSession release step (vdom, st, fire)
           , release
           )
 
-startContext
+startSession
   :: IO ()
   -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
   -> (V.HTML, st, Event -> Maybe (IO ()))
-  -> IO Context
-startContext release step (vdom, st, fire) = flip onException release $ do
+  -> IO Session
+startSession release step (vdom, st, fire) = flip onException release $ do
   let frame0 = Frame 0 vdom (const $ Just $ pure ())
   let frame1 = Frame 1 vdom fire
   (fv, qv) <- atomically $ do
@@ -651,7 +651,7 @@ startContext release step (vdom, st, fire) = flip onException release $ do
   th <- async $ flip finally release $ withWorker
     (fireLoop (getNewFrame fv) (getEvent qv))
     (stepLoop (setNewFrame fv) step st frame1)
-  pure $ Context fv qv th
+  pure $ Session fv qv th
   where
     setNewFrame var f = atomically $ do
       r <- newEmptyTMVar
