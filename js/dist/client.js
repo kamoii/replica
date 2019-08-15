@@ -263,7 +263,7 @@ function buildDOM(ws, dom, index, parent) {
 const CLOSE_CODE_NORMAL_CLOSURE = 1000;
 const CLOSE_CODE_ABNORMAL_CLOSURE = 1006;
 const CLOSE_CODE_INTERNAL_ERROR = 1011;
-const CLOSE_CODE_CONTEXT_NOT_FOUND = 4000;
+const CLOSE_CODE_SESSION_NOT_FOUND = 4000;
 // Path to connect. Includes information to attach to proper context.
 const WS_PATH_DATA_ATTR = 'replicaWsPath';
 function findRootNode() {
@@ -321,9 +321,8 @@ function connect() {
             case CLOSE_CODE_NORMAL_CLOSURE:
                 // Server-side gracefully ended.
                 break;
-            case CLOSE_CODE_CONTEXT_NOT_FOUND:
+            case CLOSE_CODE_SESSION_NOT_FOUND:
                 // When server restarted/ or re-connecting was too slow
-                // Probably "session" is a more familier name to user.
                 alert("Session terminated. Please reload the page");
                 break;
             case CLOSE_CODE_INTERNAL_ERROR:
