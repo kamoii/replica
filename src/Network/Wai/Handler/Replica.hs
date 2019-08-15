@@ -38,12 +38,13 @@ import           Data.Function                  ((&))
 import           Data.Foldable                  (for_)
 import           Data.Void                      (Void, absurd)
 import           Data.IORef                     (newIORef, atomicModifyIORef)
-import           Network.HTTP.Types             (status200)
+import           Network.HTTP.Types             (status200, status406, hAccept)
+import           Network.HTTP.Media             (matchAccept, (//))
 
 import           Network.WebSockets             (ServerApp, requestPath)
 import qualified Network.WebSockets             as WS
 import           Network.WebSockets.Connection  (ConnectionOptions, Connection, pendingRequest, rejectRequest, acceptRequest, forkPingThread, receiveData, receiveDataMessage, sendTextData, sendClose, sendCloseCode)
-import           Network.Wai                    (Application, Middleware, responseLBS)
+import           Network.Wai                    (Application, Middleware, responseLBS, requestHeaders)
 import           Network.Wai.Handler.WebSockets (websocketsOr)
 import           Text.Hex                       (encodeHex, decodeHex)
 
@@ -106,12 +107,6 @@ app AppConfig{..} rcfg cb = do
   let bapp = acfgMiddleware $ backupApp rapp
   withWorker (manageReplicaApp rapp) $ cb (websocketsOr acfgWSConnectionOptions wapp bapp)
   where
-    renderHTML html = BL.fromStrict
-      $ TE.encodeUtf8
-      $ TL.toStrict
-      $ TB.toLazyText
-      $ R.renderHTML html
-
     encodeToWsPath :: ContextID -> T.Text
     encodeToWsPath ctxId = "/" <> encodeContextId ctxId
 
@@ -119,14 +114,28 @@ app AppConfig{..} rcfg cb = do
     decodeFromWsPath wspath = decodeContextId (T.drop 1 wspath)
 
     backupApp :: ReplicaApp -> Application
-    backupApp rapp _req respond = do
-      v <- preRender rapp
-      case v of
-        Nothing -> do
-          respond $ responseLBS status200 [] ""
-        Just (ctxId, body) -> do
-          let html = V.ssrHtml acfgTitle (encodeToWsPath ctxId) acfgHeader body
-          respond $ responseLBS status200 [("content-type", "text/html")] (renderHTML html)
+    backupApp rapp req respond
+      | isAcceptable = do
+          v <- preRender rapp
+          case v of
+            Nothing -> do
+              respond $ responseLBS status200 [] ""
+            Just (ctxId, body) -> do
+              let html = V.ssrHtml acfgTitle (encodeToWsPath ctxId) acfgHeader body
+              respond $ responseLBS status200 [("content-type", "text/html")] (renderHTML html)
+      | otherwise = do
+          -- 406 Not Accetable
+          respond $ responseLBS status406 [] ""
+      where
+        isAcceptable = isJust $ do
+          ac <- lookup hAccept (requestHeaders req)
+          matchAccept ["text" // "html"] ac
+
+        renderHTML html = BL.fromStrict
+          $ TE.encodeUtf8
+          $ TL.toStrict
+          $ TB.toLazyText
+          $ R.renderHTML html
 
     websocketApp :: ReplicaApp -> ServerApp
     websocketApp rapp pendingConn = do
@@ -138,7 +147,6 @@ app AppConfig{..} rcfg cb = do
         Just ctxId -> do
           conn <- acceptRequest pendingConn
           forkPingThread conn 30
-          debugLog $ "WS started with contextId: " <> encodeContextId ctxId
           r <- try $ withContext rapp ctxId $ \ctx ->
             do
               v <- attachContextToWebsocket conn ctx
@@ -150,8 +158,14 @@ app AppConfig{..} rcfg cb = do
             `catch` handleSomeException conn ctx
 
           case r of
-            Left (e :: ContextAttachingError) -> internalErrorClosure conn e -- Rare.
-            Right _ -> pure ()
+            Left (e :: ContextAttachingError) ->
+              -- サーバ側を再起動した場合、基本みんな再接続を試そうと
+              -- してこのエラーが発生する。ブラウザ側では再ロードを勧
+              -- めるべし。
+              -- TODO: Internal Error とは違うな... セッションが切れました？のほうが近いかも。
+              internalErrorClosure conn e
+            Right _ ->
+              pure ()
       where
         -- Websocket(https://github.com/jaspervdj/websockets/blob/0f7289b2b5426985046f1733413bb00012a27537/src/Network/WebSockets/Types.hs#L141)
         -- CloseRequest(1006): When the page was closed(atleast with firefox/chrome). Termiante Context.
@@ -188,7 +202,7 @@ app AppConfig{..} rcfg cb = do
         normalClosure conn = do
           _ <- try @SomeException $ sendClose conn ("done" :: T.Text)
           recieveCloseCode conn
-          debugLog "Closing gracefully"
+          rlog rapp $ ReplicaDebugLog $ "Closing gracefully"
 
         -- After sending client the close code, we need to recieve
         -- close packet from client. If we don't do this and
@@ -200,7 +214,6 @@ app AppConfig{..} rcfg cb = do
 
         closeCodeInternalError = 1011
         closeCodeGoingAway     = 1001
-        debugLog = rlog rapp . ReplicaDebugLog
 
 -- | ReplicaApp
 -- |

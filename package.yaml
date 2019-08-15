@@ -27,6 +27,7 @@ dependencies:
 - file-embed
 - Diff
 - http-types
+- http-media
 - template-haskell
 - stm
 - text

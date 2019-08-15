@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: a07cba4581ab75a227e408f5f17f35f71fafb9656d6f4af9ac9beb5c1e0d73d2
+-- hash: 372177ab40680abbe479b0bde2316ae051afde029edede3f5f754e13451629a0
 
 name:           replica
 version:        0.1.0.0
@@ -51,6 +51,7 @@ library
     , cryptonite
     , file-embed
     , hex-text
+    , http-media
     , http-types
     , psqueues
     , stm
@@ -83,6 +84,7 @@ test-suite replica-test
     , cryptonite
     , file-embed
     , hex-text
+    , http-media
     , http-types
     , psqueues
     , quickcheck-instances
