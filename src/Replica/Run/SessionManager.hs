@@ -135,7 +135,7 @@ initialize cfg =
 -- | For rare case, the application could end without generating.
 -- TODO: use appconfig inside SessionManage
 preRender :: SessionManage -> Ses.Config res st -> IO (Maybe (SessionID, V.HTML))
-preRender rapp scfg = do
+preRender sm scfg = do
   mask $ \restore -> do
     s <- restore $ Ses.firstStep scfg
     case s of
@@ -147,8 +147,8 @@ preRender rapp scfg = do
         flip onException (Ses.terminateSession ses) $ do
           sesId <- genSessionId
           now <- Ch.now
-          dl <- atomically $ addOrphan rapp sesId ses now
-          rlog rapp $ L.InfoLog $ L.InfoOrphanAdded sesId dl
+          dl <- atomically $ addOrphan sm sesId ses now
+          rlog sm $ L.InfoLog $ L.InfoOrphanAdded sesId dl
           pure $ Just (sesId, initialVdom)
 
 -- | 取り出して
@@ -167,18 +167,18 @@ preRender rapp scfg = do
 -- | 例え orpahn 中にコンテキストが終了してしまったとしても callback は呼ばれる。
 -- |
 withSession :: SessionManage -> SessionID -> (Session -> IO a) -> IO a
-withSession rapp sesId cb = bracket req rel (cb . fst)
+withSession sm sesId cb = bracket req rel (cb . fst)
   where
     req = do
-      atomically (acquireSession rapp sesId)
-        <* rlog rapp (L.InfoLog (L.InfoOrpanAttached sesId))
+      atomically (acquireSession sm sesId)
+        <* rlog sm (L.InfoLog (L.InfoOrpanAttached sesId))
     rel r = do
       now <- Ch.now
-      atomically (releaseSession rapp sesId r now)
-        <* rlog rapp (L.InfoLog (L.InfoBackToOrphan sesId))
+      atomically (releaseSession sm sesId r now)
+        <* rlog sm (L.InfoLog (L.InfoBackToOrphan sesId))
 
 manageWorker :: SessionManage -> IO Void
-manageWorker rapp@SessionManage{..} =
+manageWorker sm@SessionManage{..} =
   fromEither <$> race (orphanTerminator smOrphans0) (orphanTerminator smOrphans)
   where
     orphanTerminator :: TVar (PSQ.OrdPSQ SessionID Ch.Time Session) -> IO Void
@@ -193,10 +193,10 @@ manageWorker rapp@SessionManage{..} =
       mask_ $ do
         -- 取り出した後に terminate が実行できないと leak するので mask の中で。
         -- ゼロ件の可能性もあるので注意(直近の deadline のものが attach された場合)
-        orphans <- atomically $ pickTargetOrphans rapp queue (max dl now)
+        orphans <- atomically $ pickTargetOrphans sm queue (max dl now)
         -- TODO: 確実に terminate したか確認したほうがいい？
         for_ orphans $ \(sesId,ses) -> async
-          $ Ses.terminateSession ses <* rlog rapp (L.InfoLog (L.InfoOrpanTerminated sesId))
+          $ Ses.terminateSession ses <* rlog sm (L.InfoLog (L.InfoOrpanTerminated sesId))
 
     fromEither (Left a)  = a
     fromEither (Right a) = a
