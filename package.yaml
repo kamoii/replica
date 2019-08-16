@@ -49,6 +49,8 @@ library:
   - Replica.VDOM.Diff
   - Replica.VDOM.Types
   - Replica.VDOM.Render
+  - Replica.Run.Types
+  - Replica.Run.Log
   - Network.Wai.Handler.Replica
   ghc-options:
   - -Wall

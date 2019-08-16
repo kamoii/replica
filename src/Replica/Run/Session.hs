@@ -2,21 +2,25 @@
 {-# LANGUAGE NamedFieldPuns #-}
 module Replica.Run.Session
   ( Session
+  , Frame(..)
   , Config(..)
+  , currentFrame
+  , waitTerminate
+  , feedEvent
   , terminateSession
   , isTerminatedSTM
   , firstStep
   , firstStep'
   ) where
 
-import           Control.Concurrent.Async       (Async, async, race, cancel, pollSTM)
+import           Control.Concurrent.Async       (Async, async, race, cancel, pollSTM, waitCatchSTM)
 import           Control.Concurrent.STM         (TMVar, TQueue, TVar, STM, atomically, retry, throwSTM
                                                 , newTVar, readTVar, writeTVar
                                                 , newTMVar, newEmptyTMVar, tryPutTMVar, readTMVar, isEmptyTMVar
-                                                , newTQueue, readTQueue)
+                                                , newTQueue, readTQueue, writeTQueue)
 import           Control.Monad                  (join, forever)
 import           Control.Applicative            ((<|>))
-import           Control.Exception              (evaluate, mask, mask_, onException, finally)
+import           Control.Exception              (SomeException, evaluate, mask, mask_, onException, finally)
 import           Data.Maybe                     (isJust)
 import           Data.Bool                      (bool)
 import           Data.Void                      (Void, absurd)
@@ -52,6 +56,22 @@ data Frame = Frame
   , frameVdom :: V.HTML
   , frameFire :: Event -> Maybe (IO ())
   }
+
+-- | Current frame.
+-- | There is aleays a frame(even for terminated frames).
+currentFrame :: Session -> STM (Frame, STM (Maybe Event))
+currentFrame Session{sesFrame} = do
+  (f, v) <- readTVar sesFrame
+  pure (f, readTMVar v)
+
+-- | Wait till session terminates.
+waitTerminate :: Session -> STM (Either SomeException ())
+waitTerminate Session{sesThread} =
+  waitCatchSTM sesThread
+
+feedEvent :: Session -> Event -> STM ()
+feedEvent Session{sesEventQueue} ev =
+  writeTQueue sesEventQueue ev
 
 -- | Kill Session
 -- |
