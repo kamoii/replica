@@ -1,5 +1,12 @@
 {-# LANGUAGE OverloadedStrings   #-}
-module Replica.Run.Log where
+module Replica.Run.Log
+  ( Log(..)
+  , InfoLog(..)
+  , ErrorLog(..)
+  , rlog
+  , format
+  , encodeTime
+  ) where
 
 import qualified Colog.Core                     as Co
 import qualified Chronos                        as Ch
@@ -53,13 +60,8 @@ toText (ErrorLog l)  = case l of
 formatSid :: SessionID -> T.Text
 formatSid sid = T.take 6 (encodeSessionId sid) <> ".."
 
-tag :: Log -> IO (Ch.Time, Co.Severity, T.Text)
-tag l = do
-  now <- Ch.now
-  pure (now, severity l, toText l)
-
-format :: (Ch.Time, Co.Severity, T.Text) -> T.Text
-format (t, s, l) = encodeTime t <> " [" <> T.pack (show s) <> "] " <> l
+format :: (Ch.Time, Log) -> T.Text
+format (t, l) = encodeTime t <> " [" <> T.pack (show (severity l)) <> "] " <> toText l
 
 -- | Thin-utility for co-log's logging
 rlog :: Co.HasLog env msg m => env -> msg -> m ()

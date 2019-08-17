@@ -49,7 +49,7 @@ data Config res st = Config
   , cfgHeader                  :: V.HTML
   , cfgWSConnectionOptions     :: ConnectionOptions
   , cfgMiddleware              :: Middleware
-  , cfgLogAction               :: Co.LogAction IO Log
+  , cfgLogAction               :: Co.LogAction IO (Ch.Time, Log)
   , cfgWSInitialConnectLimit   :: Ch.Timespan      -- ^ Time limit for first connect
   , cfgWSReconnectionSpanLimit :: Ch.Timespan      -- ^ limit for re-connecting span
   , cfgResourceAquire          :: IO res
@@ -67,10 +67,11 @@ app cfg@Config{..} cb = do
   withWorker (SM.manageWorker sm) $ cb (websocketsOr cfgWSConnectionOptions wapp bapp)
   where
     smcfg = SM.Config
-      { SM.cfgLogAction = cfgLogAction
+      { SM.cfgLogAction = Co.cmapM tagTime cfgLogAction
       , SM.cfgWSInitialConnectLimit = cfgWSInitialConnectLimit
       , SM.cfgWSReconnectionSpanLimit = cfgWSReconnectionSpanLimit
       }
+    tagTime a = (,) <$> Ch.now <*> pure a
 
 encodeToWsPath :: SessionID -> T.Text
 encodeToWsPath sid = "/" <> SID.encodeSessionId sid
