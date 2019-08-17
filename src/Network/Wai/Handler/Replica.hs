@@ -73,7 +73,7 @@ app cfg@Config{..} cb = do
       }
 
 encodeToWsPath :: SessionID -> T.Text
-encodeToWsPath sesId = "/" <> SID.encodeSessionId sesId
+encodeToWsPath sid = "/" <> SID.encodeSessionId sid
 
 decodeFromWsPath :: T.Text -> Maybe SessionID
 decodeFromWsPath wspath = SID.decodeSessionId (T.drop 1 wspath)
@@ -85,8 +85,9 @@ backupApp Config{..} sm req respond
       case v of
         Nothing -> do
           respond $ responseLBS status200 [] ""
-        Just (sesId, body) -> do
-          let html = V.ssrHtml cfgTitle (encodeToWsPath sesId) cfgHeader body
+        Just (sid, body) -> do
+          rlog sm $ L.InfoLog $ L.HTTPPrerender sid
+          let html = V.ssrHtml cfgTitle (encodeToWsPath sid) cfgHeader body
           respond $ responseLBS status200 [("content-type", "text/html")] (renderHTML html)
   | otherwise = do
       -- 406 Not Accetable
@@ -120,6 +121,7 @@ websocketApp sm pendingConn = do
     Just sid -> do
       conn <- acceptRequest pendingConn
       forkPingThread conn 30
+      rlog sm $ L.InfoLog $ L.WSAccepted sid
       r <- try $ SM.withSession sm sid $ \ses ->
         do
           v <- attachSessionToWebsocket conn ses
@@ -136,7 +138,7 @@ websocketApp sm pendingConn = do
       case r of
         Left (e :: SessionAttachingError) ->
           case e of
-            SessionDoesntExist     -> sessionNotFoundClosure conn <* rlog sm (L.DebugLog "Closure: Session didn't exist")
+            SessionDoesntExist     -> sessionNotFoundClosure conn <* rlog sm (L.InfoLog $ L.WSClosedByNotFound sid)
             SessionAlreadyAttached -> internalErrorClosure conn sid e
         Right _ ->
           pure ()
@@ -153,9 +155,9 @@ websocketApp sm pendingConn = do
       -> IO ()
     handleWSConnectionException conn sid ses e = case e of
       WS.CloseRequest code _
-        | code == closeCodeGoingAway -> S.terminateSession ses <* rlog sm (L.DebugLog "Going Away")
-        | otherwise                 -> S.terminateSession ses
-      WS.ConnectionClosed           -> pure ()
+        | code == closeCodeGoingAway -> S.terminateSession ses <* rlog sm (L.InfoLog $ L.WSClosedByGoingAwayCode sid)
+        | otherwise                 -> S.terminateSession ses <* rlog sm (L.ErrorLog $ L.WSClosedByUnexpectedCode sid (T.pack (show code)))
+      WS.ConnectionClosed           -> rlog sm (L.InfoLog $ L.WSConnectionClosed sid)
       WS.ParseException _           -> S.terminateSession ses *> internalErrorClosure conn sid e
       WS.UnicodeException _         -> S.terminateSession ses *> internalErrorClosure conn sid e
 

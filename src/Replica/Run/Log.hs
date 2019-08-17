@@ -16,10 +16,17 @@ data InfoLog
   | SessionAttached SessionID
   | SessionDetached SessionID
   | SessionTerminated SessionID T.Text
+  | WSAccepted SessionID
+  | WSClosedByNotFound SessionID
+  | WSClosedByGoingAwayCode SessionID
+  | WSConnectionClosed SessionID
+  | HTTPPrerender SessionID
 
 data ErrorLog
-  = WSClosedByInternalError SessionID T.Text
-  | WSInvalidWSPath T.Text
+  = WSInvalidWSPath T.Text
+  | WSClosedByInternalError SessionID T.Text
+  | WSClosedByUnexpectedCode SessionID T.Text
+
 
 severity :: Log -> Co.Severity
 severity (InfoLog _)  = Co.Info
@@ -29,13 +36,19 @@ severity (ErrorLog _) = Co.Error
 toText :: Log -> T.Text
 toText (DebugLog t) = t
 toText (InfoLog l)  = case l of
-  SessionCreated sid           -> "[SID:" <> formatSid sid <> "] Session Created"
-  SessionAttached sid          -> "[SID:" <> formatSid sid <> "] Session Attached"
-  SessionDetached sid          -> "[SID:" <> formatSid sid <> "] Session Detached"
-  SessionTerminated sid reason -> "[SID:" <> formatSid sid <> "] Session Terminated(" <> reason <> ")"
+  SessionCreated sid           -> "[SID:" <> formatSid sid <> "] Session created"
+  SessionAttached sid          -> "[SID:" <> formatSid sid <> "] Session attached"
+  SessionDetached sid          -> "[SID:" <> formatSid sid <> "] Session detached"
+  SessionTerminated sid reason -> "[SID:" <> formatSid sid <> "] Session terminated(" <> reason <> ")"
+  WSAccepted sid               -> "[SID:" <> formatSid sid <> "] WS request accepted"
+  WSClosedByNotFound sid       -> "[SID:" <> formatSid sid <> "] WS closed by session not found"
+  WSClosedByGoingAwayCode sid  -> "[SID:" <> formatSid sid <> "] WS closed by going away(code=1006)"
+  WSConnectionClosed sid       -> "[SID:" <> formatSid sid <> "] WS connection closed"
+  HTTPPrerender sid            -> "[SID:" <> formatSid sid <> "] HTTP pre-rendered"
 toText (ErrorLog l)  = case l of
-  WSClosedByInternalError sid mes -> "[SID:" <> formatSid sid <> "] WS closed by internal error: " <> mes
-  WSInvalidWSPath path            -> "Invalid websocket path: " <> path
+  WSInvalidWSPath path              -> "Invalid websocket path: " <> path
+  WSClosedByInternalError sid mes   -> "[SID:" <> formatSid sid <> "] WS closed by internal error: " <> mes
+  WSClosedByUnexpectedCode sid code -> "[SID:" <> formatSid sid <> "] WS closed by unexpected code: " <> code
 
 formatSid :: SessionID -> T.Text
 formatSid sid = T.take 6 (encodeSessionId sid) <> ".."
