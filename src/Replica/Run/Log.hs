@@ -12,33 +12,47 @@ data Log
   | ErrorLog  ErrorLog
 
 data InfoLog
-  = InfoOrphanAdded SessionID Ch.Time
-  | InfoOrpanAttached SessionID
-  | InfoBackToOrphan SessionID
-  | InfoOrpanTerminated SessionID
+  = SessionCreated SessionID
+  | SessionAttached SessionID
+  | SessionDetached SessionID
+  | SessionTerminated SessionID T.Text
 
 data ErrorLog
-  = ErrorWSClosedByInternalError String
+  = WSClosedByInternalError SessionID T.Text
+  | WSInvalidWSPath T.Text
 
-rlogSeverity :: Log -> Co.Severity
-rlogSeverity (InfoLog _)  = Co.Info
-rlogSeverity (DebugLog _) = Co.Debug
-rlogSeverity (ErrorLog _) = Co.Error
+severity :: Log -> Co.Severity
+severity (InfoLog _)  = Co.Info
+severity (DebugLog _) = Co.Debug
+severity (ErrorLog _) = Co.Error
 
-rlogToText :: Log -> T.Text
-rlogToText (DebugLog t) = t
-rlogToText (InfoLog l)  = case l of
-  InfoOrphanAdded sesId dl        -> "New orpahan addded: " <> encodeSessionId sesId <> ", deadline: " <> encodeTime dl
-  InfoOrpanAttached sesId         -> "Orphan attaced: " <> encodeSessionId sesId
-  InfoBackToOrphan sesId          -> "Back to orphan: " <> encodeSessionId sesId
-  InfoOrpanTerminated sesId       -> "Orphan terminated: " <> encodeSessionId sesId
-rlogToText (ErrorLog l)  = case l of
-  ErrorWSClosedByInternalError mes -> "Closed websocket connecion by internal error: " <> T.pack mes
+toText :: Log -> T.Text
+toText (DebugLog t) = t
+toText (InfoLog l)  = case l of
+  SessionCreated sid           -> "[SID:" <> formatSid sid <> "] Session Created"
+  SessionAttached sid          -> "[SID:" <> formatSid sid <> "] Session Attached"
+  SessionDetached sid          -> "[SID:" <> formatSid sid <> "] Session Detached"
+  SessionTerminated sid reason -> "[SID:" <> formatSid sid <> "] Session Terminated(" <> reason <> ")"
+toText (ErrorLog l)  = case l of
+  WSClosedByInternalError sid mes -> "[SID:" <> formatSid sid <> "] WS closed by internal error: " <> mes
+  WSInvalidWSPath path            -> "Invalid websocket path: " <> path
+
+formatSid :: SessionID -> T.Text
+formatSid sid = T.take 6 (encodeSessionId sid) <> ".."
+
+tag :: Log -> IO (Ch.Time, Co.Severity, T.Text)
+tag l = do
+  now <- Ch.now
+  pure (now, severity l, toText l)
+
+format :: (Ch.Time, Co.Severity, T.Text) -> T.Text
+format (t, s, l) = encodeTime t <> " [" <> T.pack (show s) <> "] " <> l
 
 -- | Thin-utility for co-log's logging
 rlog :: Co.HasLog env msg m => env -> msg -> m ()
 rlog env msg = Co.getLogAction env Co.<& msg
 
+-- e.g. 2019-08-17T03:33:51.99+0900
 encodeTime :: Ch.Time -> T.Text
 encodeTime time =
   Ch.encode_YmdHMSz offsetFormat subsecondPrecision Ch.w3c offsetDatetime

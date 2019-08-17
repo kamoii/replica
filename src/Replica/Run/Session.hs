@@ -4,11 +4,13 @@ module Replica.Run.Session
   ( Session
   , Frame(..)
   , Config(..)
+  , TerminatedReason(..)
   , currentFrame
   , waitTerminate
   , feedEvent
   , terminateSession
-  , isTerminatedSTM
+  , isTerminated
+  , terminatedReason
   , firstStep
   , firstStep'
   ) where
@@ -57,6 +59,10 @@ data Frame = Frame
   , frameFire :: Event -> Maybe (IO ())
   }
 
+data TerminatedReason
+  = TerminatedGracefully
+  | TerminatedByException SomeException
+
 -- | Current frame.
 -- | There is aleays a frame(even for terminated frames).
 currentFrame :: Session -> STM (Frame, STM (Maybe Event))
@@ -82,8 +88,13 @@ terminateSession Session{sesThread} = cancel sesThread
 
 -- | Check Session is terminated(gracefully or with exception)
 -- | Doesn't block.
-isTerminatedSTM :: Session -> STM Bool
-isTerminatedSTM Session{sesThread} = isJust <$> pollSTM sesThread
+isTerminated :: Session -> STM Bool
+isTerminated Session{sesThread} = isJust <$> pollSTM sesThread
+
+terminatedReason :: Session -> STM (Maybe TerminatedReason)
+terminatedReason Session{sesThread} = do
+  e <- pollSTM sesThread
+  pure $ either TerminatedByException (const TerminatedGracefully) <$> e
 
 -- | Execute the first step.
 --

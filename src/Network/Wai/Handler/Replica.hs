@@ -115,19 +115,20 @@ websocketApp sm pendingConn = do
   case decodeFromWsPath wspath of
     Nothing -> do
       -- TODO: what happens to the client side?
+      rlog sm $ L.ErrorLog $ L.WSInvalidWSPath wspath
       rejectRequest pendingConn "invalid ws path"
-    Just sesId -> do
+    Just sid -> do
       conn <- acceptRequest pendingConn
       forkPingThread conn 30
-      r <- try $ SM.withSession sm sesId $ \ses ->
+      r <- try $ SM.withSession sm sid $ \ses ->
         do
           v <- attachSessionToWebsocket conn ses
           case v of
-            Just (SomeException e) -> internalErrorClosure conn e -- Session terminated by exception
-            Nothing                -> normalClosure conn          -- Session terminated gracefully
-        `catch` handleWSConnectionException conn ses
-        `catch` handleSessionEventError conn ses
-        `catch` handleSomeException conn ses
+            Just (SomeException e) -> internalErrorClosure conn sid e -- Session terminated by exception
+            Nothing                -> normalClosure conn              -- Session terminated gracefully
+        `catch` handleWSConnectionException conn sid ses
+        `catch` handleSessionEventError conn sid ses
+        `catch` handleSomeException conn sid ses
 
       -- サーバ側を再起動した場合、基本みんな再接続を試そうとして
       -- SessionDoesntExist エラーが発生する。ブラウザ側では再ロー
@@ -135,8 +136,8 @@ websocketApp sm pendingConn = do
       case r of
         Left (e :: SessionAttachingError) ->
           case e of
-            SessionDoesntExist     -> sessionNotFoundClosure conn
-            SessionAlreadyAttached -> internalErrorClosure conn e
+            SessionDoesntExist     -> sessionNotFoundClosure conn <* rlog sm (L.DebugLog "Closure: Session didn't exist")
+            SessionAlreadyAttached -> internalErrorClosure conn sid e
         Right _ ->
           pure ()
   where
@@ -144,31 +145,38 @@ websocketApp sm pendingConn = do
     -- CloseRequest(1006): When the page was closed(atleast with firefox/chrome). Termiante Session.
     -- CloseRequest(???):  ??? Unexected Closure code
     -- ConnectionClosed: Most of the time. Connetion closed by TCP level unintentionaly. Leave contxt for re-connecting.
-    handleWSConnectionException :: Connection -> Session -> WS.ConnectionException -> IO ()
-    handleWSConnectionException conn ses e = case e of
+    handleWSConnectionException
+      :: Connection
+      -> SessionID
+      -> Session
+      -> WS.ConnectionException
+      -> IO ()
+    handleWSConnectionException conn sid ses e = case e of
       WS.CloseRequest code _
-        | code == closeCodeGoingAway -> S.terminateSession ses
+        | code == closeCodeGoingAway -> S.terminateSession ses <* rlog sm (L.DebugLog "Going Away")
         | otherwise                 -> S.terminateSession ses
       WS.ConnectionClosed           -> pure ()
-      WS.ParseException _           -> S.terminateSession ses *> internalErrorClosure conn e
-      WS.UnicodeException _         -> S.terminateSession ses *> internalErrorClosure conn e
+      WS.ParseException _           -> S.terminateSession ses *> internalErrorClosure conn sid e
+      WS.UnicodeException _         -> S.terminateSession ses *> internalErrorClosure conn sid e
 
     -- Rare. Problem occuered while event displatching/pasring.
-    handleSessionEventError :: Connection -> Session -> SessionEventError -> IO ()
-    handleSessionEventError conn ses e =
-      S.terminateSession ses *> internalErrorClosure conn e
+    handleSessionEventError :: Connection -> SessionID -> Session -> SessionEventError -> IO ()
+    handleSessionEventError conn sid ses e = do
+      S.terminateSession ses
+      internalErrorClosure conn sid e
 
     -- Rare. ??? don't know what happened
-    handleSomeException :: Connection -> Session -> SomeException -> IO ()
-    handleSomeException conn ses e =
-      S.terminateSession ses *> internalErrorClosure conn e
+    handleSomeException :: Connection -> SessionID -> Session -> SomeException -> IO ()
+    handleSomeException conn sid ses e = do
+      S.terminateSession ses
+      internalErrorClosure conn sid e
 
     -- We probably shouldn't show what caused the internal
     -- error. It'll just confuse users. For debug purpose use log.
-    internalErrorClosure conn e = do
+    internalErrorClosure conn sid e = do
       _ <- trySome $ sendCloseCode conn closeCodeInternalError ("" :: T.Text)
       recieveCloseCode conn
-      rlog sm $ L.ErrorLog $ L.ErrorWSClosedByInternalError (show e)
+      rlog sm $ L.ErrorLog $ L.WSClosedByInternalError sid (T.pack (show e))
 
     -- TODO: Currentlly doesn't work due to issue https://github.com/jaspervdj/websockets/issues/182
     -- recieveData を非同期例外で止めると、その後 connection が生きているのに Stream は close されてしまい、
@@ -177,7 +185,6 @@ websocketApp sm pendingConn = do
     normalClosure conn = do
       _ <- trySome $ sendClose conn ("done" :: T.Text)
       recieveCloseCode conn
-      rlog sm $ L.DebugLog $ "Closure: Gracefully"
 
     -- IE とは区別して扱いため。
     --
@@ -188,7 +195,6 @@ websocketApp sm pendingConn = do
     sessionNotFoundClosure conn = do
       _ <- trySome $ sendCloseCode conn closeCodeSessionNotFound ("" :: T.Text)
       recieveCloseCode conn
-      rlog sm $ L.DebugLog $ "Closure: Session didn't exist"
 
     -- After sending client the close code, we need to recieve
     -- close packet from client. If we don't do this and

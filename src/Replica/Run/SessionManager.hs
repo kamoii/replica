@@ -1,4 +1,5 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE NamedFieldPuns #-}
 module Replica.Run.SessionManager
@@ -20,6 +21,7 @@ import           Control.Monad                  (forever, when)
 import           Control.Exception              (mask, mask_, onException, bracket)
 import qualified Data.OrdPSQ                    as PSQ
 import qualified Data.Map                       as M
+import qualified Data.Text                      as T
 import           Data.Function                  ((&))
 import           Data.Foldable                  (for_)
 import           Data.Void                      (Void)
@@ -81,15 +83,22 @@ acquireSession SessionManage{..} sesId = do
       modifyTVar' smOrphans  $ PSQ.delete sesId
       pure (ses, stateVar)
 
-releaseSession :: SessionManage ->  SessionID -> (Session, TVar SessionState) -> Ch.Time -> STM ()
+releaseSession
+  :: SessionManage
+  -> SessionID
+  -> (Session, TVar SessionState)
+  -> Ch.Time
+  -> STM (Maybe Ses.TerminatedReason)
 releaseSession SessionManage{..} sesId (ses, stateVar) now = do
-  let deadline = cfgWSInitialConnectLimit smConfig `add` now
-  b <- Ses.isTerminatedSTM ses
-  if b
-    then modifyTVar' smSesMap $ M.delete sesId
-    else do
+  r <- Ses.terminatedReason ses
+  case r of
+    Just _ -> do
+      modifyTVar' smSesMap $ M.delete sesId
+    Nothing -> do
+      let deadline = cfgWSInitialConnectLimit smConfig `add` now
       writeTVar stateVar CMSOrphan
       modifyTVar' smOrphans $ PSQ.insert sesId deadline ses
+  pure r
 
 -- Get the most near deadline. Doesn't pop the queue.
 -- If the queue is empty, block till first item arrives.
@@ -146,9 +155,9 @@ preRender sm scfg = do
         ses <- startSession'
         flip onException (Ses.terminateSession ses) $ do
           sesId <- genSessionId
+          rlog sm $ L.InfoLog $ L.SessionCreated sesId
           now <- Ch.now
-          dl <- atomically $ addOrphan sm sesId ses now
-          rlog sm $ L.InfoLog $ L.InfoOrphanAdded sesId dl
+          _dl <- atomically $ addOrphan sm sesId ses now
           pure $ Just (sesId, initialVdom)
 
 -- | 取り出して
@@ -167,15 +176,23 @@ preRender sm scfg = do
 -- | 例え orpahn 中にコンテキストが終了してしまったとしても callback は呼ばれる。
 -- |
 withSession :: SessionManage -> SessionID -> (Session -> IO a) -> IO a
-withSession sm sesId cb = bracket req rel (cb . fst)
+withSession sm sid cb = bracket req rel (cb . fst)
   where
     req = do
-      atomically (acquireSession sm sesId)
-        <* rlog sm (L.InfoLog (L.InfoOrpanAttached sesId))
+      s <- atomically $ acquireSession sm sid
+      rlog sm $ L.InfoLog $ L.SessionAttached sid
+      pure s
+
     rel r = do
       now <- Ch.now
-      atomically (releaseSession sm sesId r now)
-        <* rlog sm (L.InfoLog (L.InfoBackToOrphan sesId))
+      tr <- atomically $ releaseSession sm sid r now
+      case tr of
+        Just Ses.TerminatedGracefully ->
+          rlog sm $ L.InfoLog $ L.SessionTerminated sid "gracefully"
+        Just (Ses.TerminatedByException e) ->
+          rlog sm $ L.InfoLog $ L.SessionTerminated sid ("exception: " <> T.pack (show e))
+        Nothing ->
+          rlog sm $ L.InfoLog $ L.SessionDetached sid
 
 manageWorker :: SessionManage -> IO Void
 manageWorker sm@SessionManage{..} =
@@ -196,7 +213,7 @@ manageWorker sm@SessionManage{..} =
         orphans <- atomically $ pickTargetOrphans sm queue (max dl now)
         -- TODO: 確実に terminate したか確認したほうがいい？
         for_ orphans $ \(sesId,ses) -> async
-          $ Ses.terminateSession ses <* rlog sm (L.InfoLog (L.InfoOrpanTerminated sesId))
+          $ Ses.terminateSession ses <* rlog sm (L.InfoLog (L.SessionTerminated sesId "deadline"))
 
     fromEither (Left a)  = a
     fromEither (Right a) = a
