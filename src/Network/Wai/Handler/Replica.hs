@@ -24,12 +24,12 @@ import qualified Data.Text.Lazy                 as TL
 import qualified Data.Text.Lazy.Builder         as TB
 import           Data.Maybe                     (isJust)
 import           Data.Void                      (Void, absurd)
-import           Network.HTTP.Types             (status200, status406, hAccept)
+import           Network.HTTP.Types             (status200, status404, status406, hAccept)
 import           Network.HTTP.Media             (matchAccept, (//))
 import           Network.WebSockets             (ServerApp, requestPath)
 import qualified Network.WebSockets             as WS
 import           Network.WebSockets.Connection  (ConnectionOptions, Connection, pendingRequest, rejectRequest, acceptRequest, forkPingThread, receiveData, receiveDataMessage, sendTextData, sendClose, sendCloseCode)
-import           Network.Wai                    (Application, Middleware, responseLBS, requestHeaders)
+import           Network.Wai                    (Application, Middleware, responseLBS, requestHeaders, pathInfo)
 import           Network.Wai.Handler.WebSockets (websocketsOr)
 
 import qualified Replica.VDOM                   as V
@@ -81,6 +81,8 @@ decodeFromWsPath wspath = SID.decodeSessionId (T.drop 1 wspath)
 
 backupApp :: Config res st -> SessionManage -> Application
 backupApp Config{..} sm req respond
+  | pathIs "/favicon.ico" = do
+      respond $ responseLBS status404 [] ""
   | isAcceptable = do
       v <- SM.preRender sm scfg
       case v of
@@ -104,6 +106,8 @@ backupApp Config{..} sm req respond
     isAcceptable = isJust $ do
       ac <- lookup hAccept (requestHeaders req)
       matchAccept ["text" // "html"] ac
+
+    pathIs path = ("/" <> T.intercalate "/" (pathInfo req)) == path
 
     renderHTML html = BL.fromStrict
       $ TE.encodeUtf8
