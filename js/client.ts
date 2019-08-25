@@ -422,7 +422,7 @@ function connect() {
   }
   let root = root_
   const wsPath = document.body.dataset[WS_PATH_DATA_ATTR]
-  const port = window.location.port ? window.location.port : (window.location.protocol === 'http' ? 80 : 443);
+  const port = window.location.port ? window.location.port : (window.location.protocol === 'http:' ? 80 : 443);
   const ws = new WebSocket("ws://" + window.location.hostname + ":" + port + wsPath);
 
   ws.onmessage = (event) => {
