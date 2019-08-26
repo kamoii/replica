@@ -73,11 +73,15 @@ app cfg@Config{..} cb = do
       }
     tagTime a = (,) <$> Ch.now <*> pure a
 
+-- WS path prefix is needed if you want to use reverse proxy like nginx.
+-- Currently it is fixed to "/ws/"
+-- TODO: Make it configurable
+
 encodeToWsPath :: SessionID -> T.Text
-encodeToWsPath sid = "/" <> SID.encodeSessionId sid
+encodeToWsPath sid = "/ws/" <> SID.encodeSessionId sid
 
 decodeFromWsPath :: T.Text -> Maybe SessionID
-decodeFromWsPath wspath = SID.decodeSessionId (T.drop 1 wspath)
+decodeFromWsPath wspath = SID.decodeSessionId (T.drop 4 wspath)
 
 backupApp :: Config res st -> SessionManage -> Application
 backupApp Config{..} sm req respond
