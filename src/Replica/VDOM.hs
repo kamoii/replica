@@ -67,10 +67,12 @@ defaultIndex title header =
 
 ssrHtml :: T.Text -> T.Text -> HTML -> HTML -> HTML
 ssrHtml title wsPath header body =
-  [ VLeaf "meta" (fl [("charset", AText "utf-8")])
-  , VLeaf "!doctype" (fl [("html", ABool True)])
+  [ VLeaf "!doctype" (fl [("html", ABool True)])
   , VNode "html" mempty
-      [ VNode "head" mempty ([VNode "title" mempty [VText title]] <> header)
+      [ VNode "head" mempty $
+        [ VLeaf "meta" (fl [("charset", AText "utf-8")])
+        , VNode "title" mempty [VText title]
+        ] <> header
       , VNode "body" (fl [("data-replica-ws-path", AText wsPath)])
           [ VNode "div" (fl [("data-app", AText "replica")]) body
           , VNode "script" (fl [("language", AText "javascript")])

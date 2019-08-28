@@ -83,11 +83,12 @@ encodeToWsPath sid = "/ws/" <> SID.encodeSessionId sid
 decodeFromWsPath :: T.Text -> Maybe SessionID
 decodeFromWsPath wspath = SID.decodeSessionId (T.drop 4 wspath)
 
+-- TODO: / だと Accept: text/html 使わないやつがいる？
 backupApp :: Config res st -> SessionManage -> Application
 backupApp Config{..} sm req respond
   | pathIs "/favicon.ico" = do
       respond $ responseLBS status404 [] ""
-  | isAcceptable = do
+  | isAcceptable || pathIs "/" = do
       v <- SM.preRender sm scfg
       case v of
         Nothing -> do
