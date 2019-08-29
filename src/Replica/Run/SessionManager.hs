@@ -2,11 +2,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE MultiWayIf #-}
 module Replica.Run.SessionManager
   ( SessionManage
   , Config(..)
   , initialize
   , preRender
+  , PreRenderResult(..)
   , withSession
   , manageWorker
   ) where
@@ -142,23 +144,36 @@ initialize cfg =
 
 -- | Server-side rendering
 -- | For rare case, the application could end without generating.
--- TODO: use appconfig inside SessionManage
-preRender :: SessionManage -> Ses.Config res st -> IO (Maybe (SessionID, V.HTML))
-preRender sm scfg = do
+-- |
+-- | if `onlyPrerender` is True, after we get first HTML, session is
+-- | not started(also resources is released if any) and not added as
+-- | orphan.
+data PreRenderResult
+  = PRRNothing
+  | PRROnlyPrerender V.HTML
+  | PRRSessionStarted SessionID V.HTML
+
+preRender :: SessionManage -> Ses.Config res st -> Bool -> IO PreRenderResult
+preRender sm scfg onlyPreRender =
   mask $ \restore -> do
     s <- restore $ Ses.firstStep scfg
     case s of
-      Nothing -> pure Nothing
-      Just (initialVdom, startSession', _release) -> do
-        -- NOTE: _release は使わずに即コンテキストを動き始める。この実装方針で問題ないのか？
-        -- Take care not to lost session, or else we'll leak threads.
-        ses <- startSession'
-        flip onException (Ses.terminateSession ses) $ do
-          sesId <- genSessionId
-          rlog sm $ L.InfoLog $ L.SessionCreated sesId
-          now <- Ch.now
-          _dl <- atomically $ addOrphan sm sesId ses now
-          pure $ Just (sesId, initialVdom)
+      Nothing ->
+        pure PRRNothing
+      Just (initialVdom, startSession', release) -> do
+        if
+          | onlyPreRender -> do
+              -- TODO: Should ignore exception raised in `release` ?
+              release
+              pure $ PRROnlyPrerender initialVdom
+          | otherwise -> do
+              ses <- startSession'
+              flip onException (Ses.terminateSession ses) $ do
+                sesId <- genSessionId
+                rlog sm $ L.InfoLog $ L.SessionCreated sesId
+                now <- Ch.now
+                _dl <- atomically $ addOrphan sm sesId ses now
+                pure $ PRRSessionStarted sesId initialVdom
 
 -- | 取り出して
 -- |

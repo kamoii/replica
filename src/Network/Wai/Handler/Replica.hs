@@ -24,12 +24,12 @@ import qualified Data.Text.Lazy                 as TL
 import qualified Data.Text.Lazy.Builder         as TB
 import           Data.Maybe                     (isJust)
 import           Data.Void                      (Void, absurd)
-import           Network.HTTP.Types             (status200, status404, status406, hAccept)
+import           Network.HTTP.Types             (status200, status404, hAccept, methodGet, methodHead)
 import           Network.HTTP.Media             (matchAccept, (//))
 import           Network.WebSockets             (ServerApp, requestPath)
 import qualified Network.WebSockets             as WS
 import           Network.WebSockets.Connection  (ConnectionOptions, Connection, pendingRequest, rejectRequest, acceptRequest, forkPingThread, receiveData, receiveDataMessage, sendTextData, sendClose, sendCloseCode)
-import           Network.Wai                    (Application, Middleware, responseLBS, requestHeaders, pathInfo)
+import           Network.Wai                    (Application, Middleware, responseLBS, requestHeaders, requestMethod, pathInfo)
 import           Network.Wai.Handler.WebSockets (websocketsOr)
 
 import qualified Replica.VDOM                   as V
@@ -84,22 +84,38 @@ decodeFromWsPath :: T.Text -> Maybe SessionID
 decodeFromWsPath wspath = SID.decodeSessionId (T.drop 4 wspath)
 
 -- TODO: / だと Accept: text/html 使わないやつがいる？
+--
+-- 1) Some browser accepts */* for /favicon.ico which triggers
+-- unintended pre-rendering. This guard is for those who forgot to
+-- handle /favicon.ico requests.
+--
+-- 2) We only accept GET/HEAD requests which accepts text/html or
+-- request path is "/". The later condition is for crollers which
+-- might not properly set accept headers. Pre-renders run even with
+-- HEAD requests but session is not started/stored and required
+-- resources are released.
+--
+-- 3) Just use "/" as ws path because warp discards HEAD response body
+-- anyway.
 backupApp :: Config res st -> SessionManage -> Application
 backupApp Config{..} sm req respond
-  | pathIs "/favicon.ico" = do
-      respond $ responseLBS status404 [] ""
-  | isAcceptable || pathIs "/" = do
-      v <- SM.preRender sm scfg
+  | pathIs "/favicon.ico" =
+      respond $ responseLBS status404 [] ""                     -- (1)
+  | isProperMethod && (isAcceptable || pathIs "/") = do           -- (2)
+      v <- SM.preRender sm scfg isHead
       case v of
-        Nothing -> do
+        SM.PRRNothing ->
           respond $ responseLBS status200 [] ""
-        Just (sid, body) -> do
+        SM.PRROnlyPrerender body -> do
+          -- TODO: Add proper logging for HEAD requests.
+          let html = V.ssrHtml cfgTitle "/" cfgHeader body      -- (3)
+          respond $ responseLBS status200 [("content-type", "text/html")] (renderHTML html)
+        SM.PRRSessionStarted sid body -> do
           rlog sm $ L.InfoLog $ L.HTTPPrerender sid
           let html = V.ssrHtml cfgTitle (encodeToWsPath sid) cfgHeader body
           respond $ responseLBS status200 [("content-type", "text/html")] (renderHTML html)
-  | otherwise = do
-      -- 406 Not Accetable
-      respond $ responseLBS status406 [] ""
+  | otherwise =
+      respond $ responseLBS status404 [] ""
   where
     scfg = S.Config
       { S.cfgResourceAquire = cfgResourceAquire
@@ -111,6 +127,10 @@ backupApp Config{..} sm req respond
     isAcceptable = isJust $ do
       ac <- lookup hAccept (requestHeaders req)
       matchAccept ["text" // "html"] ac
+
+    isGet = requestMethod req == methodGet
+    isHead = requestMethod req == methodHead
+    isProperMethod = isGet || isHead
 
     pathIs path = ("/" <> T.intercalate "/" (pathInfo req)) == path
 
