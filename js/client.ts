@@ -424,6 +424,7 @@ function connect() {
   const wsPath = document.body.dataset[WS_PATH_DATA_ATTR]
   const port = window.location.port ? window.location.port : (window.location.protocol === 'http:' ? 80 : 443);
   const ws = new WebSocket("ws://" + window.location.hostname + ":" + port + wsPath);
+  const developMode = new URLSearchParams(window.location.search).get("_mode") == "develop"
 
   ws.onmessage = (event) => {
     const update: Update = JSON.parse(event.data);
@@ -463,7 +464,11 @@ function connect() {
         break;
       case CLOSE_CODE_SESSION_NOT_FOUND:
         // When server restarted/ or re-connecting was too slow
-        alert("Session terminated. Please reload the page");
+        if (developMode) {
+          window.location.reload()
+        } else {
+          alert("Session terminated. Please reload the page");
+        }
         break;
       case CLOSE_CODE_INTERNAL_ERROR:
         // Error occured on server-side.
