@@ -57,7 +57,7 @@ data Config res st = Config
     , cfgResourceAquire :: IO res
     , cfgResourceRelease :: res -> IO ()
     , cfgInitial :: res -> st
-    , cfgStep :: (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
+    , cfgStep :: st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ())))
     }
 
 -- | Create replica application.
@@ -293,7 +293,7 @@ attachSessionToWebsocket conn ses = withWorker eventLoop frameLoop
             Left (v@(frame, _), stepedBy) -> do
                 diff <- evaluate $ V.diff (frameVdom prevFrame) (frameVdom frame)
                 let updateDom = UpdateDOM (frameNumber frame) (evtClientFrame <$> stepedBy) diff
-                sendTextData conn $ A.encode $ updateDom
+                sendTextData conn $ A.encode updateDom
                 frameLoop' v
             Right result ->
                 pure $ either Just (const Nothing) result
