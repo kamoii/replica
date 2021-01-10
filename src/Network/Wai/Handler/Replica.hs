@@ -32,6 +32,7 @@ import Network.WebSockets (ServerApp, requestPath)
 import qualified Network.WebSockets as WS
 import Network.WebSockets.Connection (Connection, ConnectionOptions, acceptRequest, forkPingThread, pendingRequest, receiveData, receiveDataMessage, rejectRequest, sendClose, sendCloseCode, sendTextData)
 
+import Control.Monad.Trans.Resource (ResourceT)
 import Replica.Run.Log (Log, rlog)
 import qualified Replica.Run.Log as L
 import Replica.Run.Session (Frame (frameNumber, frameVdom), Session)
@@ -44,7 +45,7 @@ import Replica.Run.Types (Event (evtClientFrame), SessionAttachingError (Session
 import qualified Replica.VDOM as V
 import qualified Replica.VDOM.Render as R
 
-data Config res st = Config
+data Config st = Config
     { cfgTitle :: T.Text
     , cfgHeader :: V.HTML
     , cfgWSConnectionOptions :: ConnectionOptions
@@ -54,18 +55,16 @@ data Config res st = Config
       cfgWSInitialConnectLimit :: Ch.Timespan
     , -- | limit for re-connecting span
       cfgWSReconnectionSpanLimit :: Ch.Timespan
-    , cfgResourceAquire :: IO res
-    , cfgResourceRelease :: res -> IO ()
-    , cfgInitial :: res -> st
-    , cfgStep :: st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ())))
+    , cfgInitial :: ResourceT IO st
+    , cfgStep :: st -> ResourceT IO (Maybe (V.HTML, st, Event -> Maybe (IO ())))
     }
 
 -- | Create replica application.
-app :: Config res st -> (Application -> IO a) -> IO a
+app :: Config st -> (Application -> IO a) -> IO a
 app cfg@Config{..} cb = do
     sm <- SM.initialize smcfg
     let wapp = websocketApp sm
-    let bapp = cfgMiddleware $ backupApp cfg sm
+    let bapp = cfgMiddleware $ backendApp cfg sm
     withWorker (SM.manageWorker sm) $ cb (websocketsOr cfgWSConnectionOptions wapp bapp)
   where
     smcfg =
@@ -100,8 +99,8 @@ decodeFromWsPath wspath = SID.decodeSessionId (T.drop 4 wspath)
 --
 -- 3) Just use "/" as ws path because warp discards HEAD response body
 -- anyway.
-backupApp :: Config res st -> SessionManage -> Application
-backupApp Config{..} sm req respond
+backendApp :: Config st -> SessionManage -> Application
+backendApp Config{..} sm req respond
     | pathIs "/favicon.ico" =
         respond $ responseLBS status404 [] "" -- (1)
     | isProperMethod && (isAcceptable || pathIs "/") = do
@@ -123,9 +122,7 @@ backupApp Config{..} sm req respond
   where
     scfg =
         S.Config
-            { S.cfgResourceAquire = cfgResourceAquire
-            , S.cfgResourceRelease = cfgResourceRelease
-            , S.cfgInitial = cfgInitial
+            { S.cfgInitial = cfgInitial
             , S.cfgStep = cfgStep
             }
 
@@ -140,11 +137,11 @@ backupApp Config{..} sm req respond
     pathIs path = ("/" <> T.intercalate "/" (pathInfo req)) == path
 
     renderHTML html =
-        BL.fromStrict $
-            TE.encodeUtf8 $
-                TL.toStrict $
-                    TB.toLazyText $
-                        R.renderHTML html
+        BL.fromStrict
+            . TE.encodeUtf8
+            . TL.toStrict
+            . TB.toLazyText
+            $ R.renderHTML html
 
 websocketApp :: SessionManage -> ServerApp
 websocketApp sm pendingConn = do

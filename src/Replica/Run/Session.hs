@@ -1,9 +1,10 @@
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE NamedFieldPuns #-}
 module Replica.Run.Session
   ( Session
-  , Frame(..)
   , Config(..)
+  , Frame(..)
   , TerminatedReason(..)
   , currentFrame
   , waitTerminate
@@ -30,6 +31,9 @@ import           Data.IORef                     (newIORef, atomicModifyIORef)
 
 import qualified Replica.VDOM                   as V
 import           Replica.Run.Types              (Event(evtClientFrame), SessionEventError(InvalidEvent))
+import Control.Monad.Trans.Resource (ResourceT)
+import qualified Control.Monad.Trans.Resource as RI
+import Control.Monad.IO.Class (MonadIO(liftIO))
 
 -- | Session
 --
@@ -40,11 +44,9 @@ import           Replica.Run.Types              (Event(evtClientFrame), SessionE
 --
 -- TODO: TMVar in a TVar. Is that a good idea?
 -- TODO: Is name `Session` appropiate?
-data Config res st = Config
-  { cfgResourceAquire           :: IO res
-  , cfgResourceRelease          :: res -> IO ()
-  , cfgInitial                  :: res -> st
-  , cfgStep                     :: (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
+data Config state = Config
+  { cfgInitial :: ResourceT IO state
+  , cfgStep    :: state -> ResourceT IO (Maybe (V.HTML, state, Event -> Maybe (IO ())))
   }
 
 data Session = Session
@@ -76,8 +78,7 @@ waitTerminate Session{sesThread} =
   waitCatchSTM sesThread
 
 feedEvent :: Session -> Event -> STM ()
-feedEvent Session{sesEventQueue} ev =
-  writeTQueue sesEventQueue ev
+feedEvent Session{sesEventQueue} = writeTQueue sesEventQueue
 
 -- | Kill Session
 -- |
@@ -116,43 +117,45 @@ terminatedReason Session{sesThread} = do
 -- Implementation notes:
 -- 全体を onException で囲めないのは Nohting の場合は例外が発生していないが
 -- `releaseRes` を呼び出さないといけないため。
-firstStep :: Config res st -> IO (Maybe (V.HTML, IO Session, IO ()))
+firstStep :: Config state -> IO (Maybe (V.HTML, IO Session, IO ()))
 firstStep Config{..} =
-  firstStep' cfgResourceAquire cfgResourceRelease cfgInitial cfgStep
+  firstStep' cfgInitial cfgStep
 
 firstStep'
-  :: IO res
-  -> (res -> IO ())
-  -> (res -> st)
-  -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
+  :: ResourceT IO state
+  -> (state -> ResourceT IO (Maybe (V.HTML, state, Event -> Maybe (IO ()))))
   -> IO (Maybe (V.HTML, IO Session, IO ()))
-firstStep' acquireRes releaseRes_ initial step = mask $ \restore -> do
-  v <- acquireRes
-  i <- newIORef False
-  -- Make sure that `releaseRes_ v` is called once.
-  let release = mask_ $ do
-        b <- atomicModifyIORef i $ \done -> (True, done)
-        if b then pure () else releaseRes_ v
+firstStep' initial step = mask $ \restore -> do
+  doneVar <- newIORef False
+  rstate <- RI.createInternalState
+  let release = mkRelease doneVar rstate
   flip onException release $ do
-    r <- restore $ step (initial v)
+    r <- restore . flip RI.runInternalState rstate $ step =<< initial
     case r of
       Nothing -> do
         release
         pure Nothing
-      Just (_vdom, st, fire) -> do
+      Just (_vdom, state, fire) -> do
         vdom <- evaluate _vdom
         pure $ Just
           ( vdom
-          , startSession release step (vdom, st, fire)
+          , startSession release step rstate (vdom, state, fire)
           , release
           )
+  where
+    -- Make sure that `closeInternalState v` is called once.
+    -- Do we need it??
+    mkRelease doneVar rstate = mask_ $ do
+        b <- atomicModifyIORef doneVar (True,)
+        if b then pure () else RI.closeInternalState rstate
 
 startSession
   :: IO ()
-  -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
+  -> (st -> ResourceT IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
+  -> RI.InternalState
   -> (V.HTML, st, Event -> Maybe (IO ()))
   -> IO Session
-startSession release step (vdom, st, fire) = flip onException release $ do
+startSession release step rstate (vdom, st, fire) = flip onException release $ do
   let frame0 = Frame 0 vdom (const $ Just $ pure ())
   let frame1 = Frame 1 vdom fire
   (fv, qv) <- atomically $ do
@@ -160,9 +163,9 @@ startSession release step (vdom, st, fire) = flip onException release $ do
     f <- newTVar (frame0, r)
     q <- newTQueue
     pure (f, q)
-  th <- async $ flip finally release $ withWorker
+  th <- async $ withWorker
     (fireLoop (getNewFrame fv) (getEvent qv))
-    (stepLoop (setNewFrame fv) step st frame1)
+    (stepLoop (setNewFrame fv) step st frame1 `RI.runInternalState` rstate `finally` release)
   pure $ Session fv qv th
   where
     setNewFrame var f = atomically $ do
@@ -193,18 +196,18 @@ startSession release step (vdom, st, fire) = flip onException release $ do
 -- before actually firing it. While firing the event, servier-side event could procceed the step.
 stepLoop
   :: (Frame -> IO (TMVar (Maybe Event)))
-  -> (st -> IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
+  -> (st -> ResourceT IO (Maybe (V.HTML, st, Event -> Maybe (IO ()))))
   -> st
   -> Frame
-  -> IO ()
+  -> ResourceT IO ()
 stepLoop setNewFrame step st frame = do
-  stepedBy <- setNewFrame frame
+  stepedBy <- liftIO $ setNewFrame frame
   r <- step st
-  _ <- atomically $ tryPutTMVar stepedBy Nothing
+  _ <- liftIO . atomically $ tryPutTMVar stepedBy Nothing
   case r of
     Nothing -> pure ()
     Just (_newVdom, newSt, newFire) -> do
-      newVdom <- evaluate _newVdom
+      newVdom <- liftIO $ evaluate _newVdom
       let newFrame = Frame (frameNumber frame + 1) newVdom newFire
       stepLoop setNewFrame step newSt newFrame
 
