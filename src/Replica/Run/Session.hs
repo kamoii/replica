@@ -52,18 +52,7 @@ import qualified Control.Monad.Trans.Resource as RI
 import Replica.Run.Types (Event (evtClientFrame), SessionEventError (InvalidEvent))
 import qualified Replica.VDOM as V
 
-{- | Session
-
-  NOTES:
-
-  * For every frame, its corresponding TMVar should get a value before the next (frame,stepedBy) is written.
-    Only exception to this is when exception occurs, last setted frame's `stepedBy` could be empty forever.
-
- TODO: TMVar in a TVar. Is that a good idea?
- TODO: Is name `Session` appropiate?
--}
-
--- * Types
+-- * Application
 
 -- TODO: Maybe name `Application' is better?
 {- | Application
@@ -103,6 +92,18 @@ data Config state = Config
     , cfgStep :: state -> ResourceT IO (Maybe (V.HTML, state, Event -> Maybe (IO ())))
     }
 
+-- * Session
+
+{- | Session is a running Application
+
+  NOTES:
+
+  * For every frame, its corresponding TMVar should get a value before the next (frame,stepedBy) is written.
+    Only exception to this is when exception occurs, last setted frame's `stepedBy` could be empty forever.
+
+ TODO: TMVar in a TVar. Is that a good idea?
+ TODO: Is name `Session` appropiate?
+-}
 data Session = Session
     { sesFrame :: TVar (Frame, TMVar (Maybe Event))
     , sesEventQueue :: TQueue Event -- TBqueue might be better
