@@ -62,6 +62,13 @@ import qualified Replica.VDOM as V
  TODO: TMVar in a TVar. Is that a good idea?
  TODO: Is name `Session` appropiate?
 -}
+
+-- TODO: Maybe name `Application' is better?
+{-
+
+Manage resource(File Handlers, Threads, etc) using ResourceT/MonadResource.
+
+-}
 data Config state = Config
     { cfgInitial :: ResourceT IO state
     , cfgStep :: state -> ResourceT IO (Maybe (V.HTML, state, Event -> Maybe (IO ())))
@@ -83,8 +90,10 @@ data TerminatedReason
     = TerminatedGracefully
     | TerminatedByException SomeException
 
+-- * Session operation
+
 {- | Current frame.
- | There is aleays a frame(even for terminated frames).
+There is aleays a frame even for terminated sessions.
 -}
 currentFrame :: Session -> STM (Frame, STM (Maybe Event))
 currentFrame Session{sesFrame} = do
@@ -96,19 +105,20 @@ waitTerminate :: Session -> STM (Either SomeException ())
 waitTerminate Session{sesThread} =
     waitCatchSTM sesThread
 
+-- | Feed Session an Event.
 feedEvent :: Session -> Event -> STM ()
 feedEvent Session{sesEventQueue} = writeTQueue sesEventQueue
 
 {- | Kill Session
- |
- | Do nothing if the session has already terminated.
- | Blocks until the session is actually terminated.
+
+ * Do nothing if the session has already terminated.
+ * Blocks until the session is actually terminated.
 -}
 terminateSession :: Session -> IO ()
 terminateSession Session{sesThread} = cancel sesThread
 
 {- | Check Session is terminated(gracefully or with exception)
- | Doesn't block.
+Doesn't block.
 -}
 isTerminated :: Session -> STM Bool
 isTerminated Session{sesThread} = isJust <$> pollSTM sesThread
@@ -117,27 +127,36 @@ terminatedReason :: Session -> STM (Maybe TerminatedReason)
 terminatedReason Session{sesThread} = do
     e <- pollSTM sesThread
     pure $ either TerminatedByException (const TerminatedGracefully) <$> e
+-- * Starting Session
 
-{- | Execute the first step.
+{- | Execute the first step. Main purpose is to implement SSR.
 
- In rare case, the app might not create any VDOM and gracefuly
- end. In such case, `Nothing` is returned.
+Run the application till we get the first view. After we reach first view, the
+application is suspended, though there might be threads running if application
+invokes them before we reach first view.
 
- Don't execute while mask.
+(V.HTML, IO Session, IO ())
 
- About Resource management
-  * リソースが獲得されたなら、firstSteps関数が
+ * V.HTML      First view
+ * IO Session  Continue the suspended appliction and manages it as Session.
+ * IO ()       Release the resource acquired by application such as File Handlers/Threads..
 
- もし `firstStep`関数が無事完了し、Just を返したならば、返り値の IO
- Session, もしくは IO () のどちらかが一方だけが必ず呼ばれる必要があ
- る。後者は、Session を開始したくない場合に利用する(例えば一定時間立っ
- ても browser が繋げに来なかった場合、など)。
+Either `IO Session' or `IO ()' must be invoked orelase resrouce will
+leak. Later(`IO ()') is for when we want descard this suspended application.
 
- リソース獲得及び解放ハンドラは mask された状態で実行される
+Some additional notes:
 
- Implementation notes:
- 全体を onException で囲めないのは Nohting の場合は例外が発生していないが
- `releaseRes` を呼び出さないといけないため。
+ * In rare case, application might not create any VDOM and gracefuly end. In
+   such case, `Nothing` is returned.
+ * If the application throws exception before we reach the fist view update,
+   then the exception is simply raised.
+ * Don't execute `fistStep' inside a mask.
+
+Implementation notes:
+
+ * リソース獲得及び解放ハンドラは mask された状態で実行される
+ * 全体を onException で囲めないのは Nohting の場合は例外が発生していないが
+   `releaseRes` を呼び出さないといけないため。
 -}
 firstStep :: Config state -> IO (Maybe (V.HTML, IO Session, IO ()))
 firstStep Config{..} =
