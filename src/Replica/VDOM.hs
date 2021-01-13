@@ -15,7 +15,6 @@ module Replica.VDOM
 
 import qualified Data.ByteString            as B
 import qualified Data.FileEmbed             as FE
-import           Data.Monoid                ((<>))
 import qualified Data.Text                  as T
 import qualified Data.Text.Encoding         as T
 import qualified Data.Map                   as M
