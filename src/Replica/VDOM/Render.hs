@@ -2,7 +2,6 @@
 
 module Replica.VDOM.Render where
 
-import           Data.Monoid                ((<>))
 import qualified Data.Text                  as T
 import qualified Data.Text.Lazy.Builder     as TB
 import qualified Data.Map                   as M

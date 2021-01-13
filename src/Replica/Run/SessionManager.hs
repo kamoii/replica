@@ -31,8 +31,8 @@ import Torsor (add, difference, scale)
 
 import Replica.Run.Log (Log, rlog)
 import qualified Replica.Run.Log as L
-import Replica.Run.Session (Session)
-import qualified Replica.Run.Session as Ses
+import Replica.Run.Application (Session)
+import qualified Replica.Run.Application as Ses
 import Replica.Run.SessionID (SessionID, genSessionId)
 import Replica.Run.Types (SessionAttachingError (SessionAlreadyAttached, SessionDoesntExist))
 import qualified Replica.VDOM as V
@@ -158,7 +158,7 @@ data PreRenderResult
 
 preRender ::
     SessionManage ->
-    Ses.Config state ->
+    Ses.Application state ->
     Bool ->
     IO PreRenderResult
 preRender sm scfg onlyPreRender =

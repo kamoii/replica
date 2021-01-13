@@ -33,10 +33,10 @@ import qualified Network.WebSockets as WS
 import Network.WebSockets.Connection (Connection, ConnectionOptions, acceptRequest, forkPingThread, pendingRequest, receiveData, receiveDataMessage, rejectRequest, sendClose, sendCloseCode, sendTextData)
 
 import Control.Monad.Trans.Resource (ResourceT)
+import Replica.Run.Application (Frame (frameNumber, frameVdom), Session)
+import qualified Replica.Run.Application as S
 import Replica.Run.Log (Log, rlog)
 import qualified Replica.Run.Log as L
-import Replica.Run.Session (Frame (frameNumber, frameVdom), Session)
-import qualified Replica.Run.Session as S
 import Replica.Run.SessionID (SessionID)
 import qualified Replica.Run.SessionID as SID
 import Replica.Run.SessionManager (SessionManage)
@@ -104,8 +104,7 @@ backendApp Config{..} sm req respond
     | pathIs "/favicon.ico" =
         respond $ responseLBS status404 [] "" -- (1)
     | isProperMethod && (isAcceptable || pathIs "/") = do
-        -- (2)
-        v <- SM.preRender sm scfg isHead
+        v <- SM.preRender sm app' isHead -- (2)
         case v of
             SM.PRRNothing ->
                 respond $ responseLBS status200 [] ""
@@ -120,8 +119,8 @@ backendApp Config{..} sm req respond
     | otherwise =
         respond $ responseLBS status404 [] ""
   where
-    scfg =
-        S.Config
+    app' =
+        S.Application
             { S.cfgInitial = cfgInitial
             , S.cfgStep = cfgStep
             }

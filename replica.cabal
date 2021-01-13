@@ -37,7 +37,7 @@ library
       Replica.Run.Log
       Network.Wai.Handler.Replica
   other-modules:
-      Replica.Run.Session
+      Replica.Run.Application
       Replica.Run.SessionID
       Replica.Run.SessionManager
       Paths_replica
