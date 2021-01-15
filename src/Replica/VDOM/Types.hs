@@ -12,6 +12,7 @@ t = id
 
 type HTML = [VDOM]
 
+-- TODO: add note about difference about Text and RawText
 data VDOM
     = VNode !T.Text !Attrs ![VDOM]
     | VLeaf !T.Text !Attrs

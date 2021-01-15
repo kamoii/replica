@@ -53,8 +53,6 @@ import qualified Replica.VDOM as V
 
 -- * Application
 
--- TODO: Maybe name `Application' is better?
-
 {- | Application
 
  * Blocking step could be resumed by
@@ -109,7 +107,7 @@ data Application state = Application
     Only exception to this is when exception occurs, last setted frame's `stepedBy` could be empty forever.
 
  TODO: TMVar in a TVar. Is that a good idea?
- TODO: Is name `Session` appropiate?
+ TODO: Note why we need TMVar (Maybe Event) for sesFrame.
 -}
 data Session = Session
     { sesFrame :: TVar (Frame, TMVar (Maybe Event))
