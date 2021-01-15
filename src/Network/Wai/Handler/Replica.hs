@@ -56,7 +56,7 @@ data Config st = Config
     , -- | limit for re-connecting span
       cfgWSReconnectionSpanLimit :: Ch.Timespan
     , cfgInitial :: ResourceT IO st
-    , cfgStep :: st -> ResourceT IO (Maybe (V.HTML, st, Event -> Maybe (IO ())))
+    , cfgStep :: st -> ResourceT IO (Maybe (V.HTML, st))
     }
 
 -- | Create replica application.
