@@ -1,6 +1,6 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Replica.Run.Types where
+module Replica.Types where
 
 import           Control.Exception              (Exception)
 import           Data.Aeson                     ((.:), (.=))

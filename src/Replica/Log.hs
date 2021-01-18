@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings   #-}
-module Replica.Run.Log
+module Replica.Log
   ( Log(..)
   , InfoLog(..)
   , ErrorLog(..)
@@ -11,7 +11,7 @@ module Replica.Run.Log
 import qualified Colog.Core                     as Co
 import qualified Chronos                        as Ch
 import qualified Data.Text                      as T
-import Replica.Run.SessionID (SessionID, encodeSessionId)
+import Replica.SessionID (SessionID, encodeSessionId)
 
 data Log
   = DebugLog T.Text

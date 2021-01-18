@@ -1,4 +1,4 @@
-module Replica.Run.SessionID
+module Replica.SessionID
   ( SessionID
   , genSessionId
   , encodeSessionId

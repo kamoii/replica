@@ -2,7 +2,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TupleSections #-}
 
-module Replica.Run.Application (
+module Replica.Application (
     Application (..),
     Session,
     Frame (..),
@@ -48,7 +48,7 @@ import Data.Void (Void, absurd)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Trans.Resource (ResourceT)
 import qualified Control.Monad.Trans.Resource as RI
-import Replica.Run.Types (Event (..), SessionEventError (InvalidEvent))
+import Replica.Types (Event (..), SessionEventError (InvalidEvent))
 import qualified Replica.VDOM as V
 
 -- * Application

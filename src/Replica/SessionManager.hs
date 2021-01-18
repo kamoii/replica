@@ -4,7 +4,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
-module Replica.Run.SessionManager (
+module Replica.SessionManager (
     SessionManage,
     Config (..),
     initialize,
@@ -29,12 +29,12 @@ import qualified Data.Text as T
 import Data.Void (Void)
 import Torsor (add, difference, scale)
 
-import Replica.Run.Log (Log, rlog)
-import qualified Replica.Run.Log as L
-import Replica.Run.Application (Session)
-import qualified Replica.Run.Application as Ses
-import Replica.Run.SessionID (SessionID, genSessionId)
-import Replica.Run.Types (SessionAttachingError (SessionAlreadyAttached, SessionDoesntExist))
+import Replica.Log (Log, rlog)
+import qualified Replica.Log as L
+import Replica.Application (Session)
+import qualified Replica.Application as Ses
+import Replica.SessionID (SessionID, genSessionId)
+import Replica.Types (SessionAttachingError (SessionAlreadyAttached, SessionDoesntExist))
 import qualified Replica.VDOM as V
 
 data Config = Config

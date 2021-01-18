@@ -33,15 +33,15 @@ import qualified Network.WebSockets as WS
 import Network.WebSockets.Connection (Connection, ConnectionOptions, acceptRequest, forkPingThread, pendingRequest, receiveData, receiveDataMessage, rejectRequest, sendClose, sendCloseCode, sendTextData)
 
 import Control.Monad.Trans.Resource (ResourceT)
-import Replica.Run.Application (Frame (frameNumber, frameVdom), Session)
-import qualified Replica.Run.Application as S
-import Replica.Run.Log (Log, rlog)
-import qualified Replica.Run.Log as L
-import Replica.Run.SessionID (SessionID)
-import qualified Replica.Run.SessionID as SID
-import Replica.Run.SessionManager (SessionManage)
-import qualified Replica.Run.SessionManager as SM
-import Replica.Run.Types (Event (evtClientFrame), SessionAttachingError (SessionAlreadyAttached, SessionDoesntExist), SessionEventError (IllformedData), Update (ReplaceDOM, UpdateDOM))
+import Replica.Application (Frame (frameNumber, frameVdom), Session)
+import qualified Replica.Application as S
+import Replica.Log (Log, rlog)
+import qualified Replica.Log as L
+import Replica.SessionID (SessionID)
+import qualified Replica.SessionID as SID
+import Replica.SessionManager (SessionManage)
+import qualified Replica.SessionManager as SM
+import Replica.Types (Event (evtClientFrame), SessionAttachingError (SessionAlreadyAttached, SessionDoesntExist), SessionEventError (IllformedData), Update (ReplaceDOM, UpdateDOM))
 import qualified Replica.VDOM as V
 import qualified Replica.VDOM.Render as R
 
