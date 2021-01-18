@@ -1,10 +1,10 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.31.2.
+-- This file has been generated from package.yaml by hpack version 0.33.0.
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 2a6533eed33cea3bd7079b0c6430591d68c35d47a9e81cdb9ac4667bbdff43e4
+-- hash: 102b703044048d47246735ecf54d6656779b64d91a0a7bc0079205cf2eca97bd
 
 name:           replica
 version:        0.1.0.0
@@ -29,17 +29,17 @@ source-repository head
 
 library
   exposed-modules:
-      Replica.VDOM
-      Replica.VDOM.Diff
-      Replica.VDOM.Types
-      Replica.VDOM.Render
-      Replica.Run.Types
-      Replica.Run.Log
       Network.Wai.Handler.Replica
-  other-modules:
       Replica.Run.Application
+      Replica.Run.Log
       Replica.Run.SessionID
       Replica.Run.SessionManager
+      Replica.Run.Types
+      Replica.VDOM
+      Replica.VDOM.Diff
+      Replica.VDOM.Render
+      Replica.VDOM.Types
+  other-modules:
       Paths_replica
   hs-source-dirs:
       src
@@ -59,6 +59,7 @@ library
     , http-media
     , http-types
     , psqueues
+    , resourcet
     , stm
     , template-haskell
     , text
@@ -66,7 +67,6 @@ library
     , wai
     , wai-websockets
     , websockets
-    , resourcet
   default-language: Haskell2010
 
 test-suite replica-test
@@ -95,6 +95,7 @@ test-suite replica-test
     , psqueues
     , quickcheck-instances
     , replica
+    , resourcet
     , stm
     , template-haskell
     , text

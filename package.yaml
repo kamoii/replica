@@ -41,17 +41,10 @@ dependencies:
 - torsor
 - psqueues
 - co-log-core
+- resourcet
 
 library:
   source-dirs: src
-  exposed-modules:
-  - Replica.VDOM
-  - Replica.VDOM.Diff
-  - Replica.VDOM.Types
-  - Replica.VDOM.Render
-  - Replica.Run.Types
-  - Replica.Run.Log
-  - Network.Wai.Handler.Replica
   ghc-options:
   - -Wall
   - -ferror-spans
