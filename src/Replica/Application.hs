@@ -93,8 +93,14 @@ about the follwing problem.
 TODO: WRITE
 -}
 data Application state = Application
-    { cfgInitial :: ResourceT IO state
+    { cfgInitial :: Context -> ResourceT IO state
     , cfgStep :: state -> ResourceT IO (Maybe (V.HTML, state))
+    }
+
+-- Request header, Path, Query,
+-- JS FFI
+data Context = Context
+    { jsCall :: forall a. FromJSON a => JSCode -> IO (Either JSError a)
     }
 
 -- * Session
